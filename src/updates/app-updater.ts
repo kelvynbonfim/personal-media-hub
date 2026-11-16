@@ -1,5 +1,5 @@
-export const CURRENT_APP_VERSION = '1.1.0';
-export const CURRENT_BUILD_NUMBER = 2;
+export const CURRENT_APP_VERSION = '1.2.0';
+export const CURRENT_BUILD_NUMBER = 3;
 
 export const DEFAULT_VERSION_MANIFEST_URL =
   'https://raw.githubusercontent.com/kelvynbonfim/personal-media-hub/main/version.json';
