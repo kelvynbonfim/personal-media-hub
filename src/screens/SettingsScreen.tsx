@@ -15,6 +15,7 @@ import {
   DEFAULT_APP_SETTINGS,
   DEFAULT_UNITV_PORTAL_URL,
 } from '../db/schema';
+import { isUniTvDiagnosticAvailable } from '../diagnostics/unitv-diagnostic';
 import { useOptionalAppServices } from '../navigation/AppServicesContext';
 import {
   buildPortalUrl,
@@ -78,6 +79,7 @@ export function SettingsScreen(
   props: SettingsScreenProps = {}
 ): React.JSX.Element {
   const {
+    navigation,
     services: injectedServices,
     testConnection: injectedTestConnection,
     syncUserId: initialSyncUserId,
@@ -939,6 +941,30 @@ export function SettingsScreen(
             </Text>
           ) : null}
         </View>
+
+        {isUniTvDiagnosticAvailable() ? (
+          <View
+            style={styles.sectionCard}
+            testID="settings-unitv-diagnostic-card"
+          >
+            <Text style={styles.sectionTitle}>Diagnóstico UniTV (Dev)</Text>
+            <Text style={styles.mutedText}>
+              Abre https://www.unitvwebs.com em WebView visível isolada para
+              ensaio manual, sem injeção automática de scripts nem alteração do
+              fluxo normal.
+            </Text>
+            <Pressable
+              onPress={() => navigation?.navigate('UniTvDiagnostic')}
+              accessibilityRole="button"
+              testID="settings-open-unitv-diagnostic-button"
+              style={styles.outlineAccentButton}
+            >
+              <Text style={styles.outlineAccentButtonText}>
+                Abrir Ensaio WebView UniTV
+              </Text>
+            </Pressable>
+          </View>
+        ) : null}
       </ScrollView>
     </View>
   );

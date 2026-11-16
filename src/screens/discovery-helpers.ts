@@ -6,6 +6,7 @@ import { AppServices } from '../navigation/AppServicesContext';
 export interface DiscoveryNavigation {
   navigate: (routeName: string, params?: any) => void;
   goBack?: () => void;
+  canGoBack?: () => boolean;
   addListener?: (event: string, callback: () => void) => () => void;
 }
 

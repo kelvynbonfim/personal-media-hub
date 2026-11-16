@@ -1,20 +1,17 @@
-name: Android Release APK
+name: Android Diagnostic APK (UniTV)
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    tags:
-      - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-android-apk:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      EXPO_PUBLIC_UNITV_DIAGNOSTIC: '1'
 
     steps:
       - name: Checkout repository
@@ -58,30 +55,16 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      - name: Build Android Release APK
+      - name: Build Android Diagnostic Release APK
         run: |
           cd android
           chmod +x gradlew
           ./gradlew assembleRelease
 
-      - name: Upload APK artifact
+      - name: Upload diagnostic APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: personal-media-hub-release-apk
+          name: personal-media-hub-diag-unitv-${{ github.sha }}
           path: android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 14
-
-      - name: Publish GitHub Release APK
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          VERSION=$(node -e "console.log(require('./version.json').version)")
-          NOTES=$(node -e "console.log(require('./version.json').releaseNotes || 'Nova atualização disponível.')")
-          cp android/app/build/outputs/apk/release/*.apk ./app-release.apk
-          TAG="v${VERSION}"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" ./app-release.apk --clobber
-          else
-            gh release create "$TAG" ./app-release.apk --title "Personal Media Hub ${TAG}" --notes "$NOTES"
-          fi

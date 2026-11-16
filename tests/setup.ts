@@ -336,9 +336,11 @@ jest.mock('expo-sqlite', () => {
 });
 
 const secureStoreMemory = new Map<string, string>();
+delete process.env.EXPO_PUBLIC_UNITV_DIAGNOSTIC;
 
 beforeEach(() => {
   secureStoreMemory.clear();
+  delete process.env.EXPO_PUBLIC_UNITV_DIAGNOSTIC;
 });
 
 jest.mock('expo-secure-store', () => ({

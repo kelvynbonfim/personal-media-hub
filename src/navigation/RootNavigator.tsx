@@ -13,7 +13,12 @@ import { ExploreScreen } from '../screens/ExploreScreen';
 import { HomeScreen } from '../screens/HomeScreen';
 import { LibraryScreen } from '../screens/LibraryScreen';
 import { SettingsScreen } from '../screens/SettingsScreen';
+import { UniTvDiagnosticScreen } from '../screens/UniTvDiagnosticScreen';
 import { VideoPlayerScreen } from '../screens/VideoPlayerScreen';
+import {
+  isStandaloneUniTvDiagnosticMode,
+  isUniTvDiagnosticAvailable,
+} from '../diagnostics/unitv-diagnostic';
 import { THEME_TOKENS } from '../theme/tokens';
 
 export type MainTabParamList = {
@@ -28,6 +33,7 @@ export type RootStackParamList = {
   AnimeDetails: { anilistId: number; mediaItemId?: string };
   VideoPlayer: { mediaItemId: string; episodeNumber: number };
   Settings: undefined;
+  UniTvDiagnostic: undefined;
 };
 
 export interface RootNavigatorScreens {
@@ -38,6 +44,7 @@ export interface RootNavigatorScreens {
   AnimeDetails: React.ComponentType<any>;
   VideoPlayer: React.ComponentType<any>;
   Settings: React.ComponentType<any>;
+  UniTvDiagnostic?: React.ComponentType<any>;
 }
 
 export interface RootNavigatorProps {
@@ -87,6 +94,7 @@ const DEFAULT_SCREENS: RootNavigatorScreens = {
   AnimeDetails: AnimeDetailsScreen,
   VideoPlayer: VideoPlayerScreen,
   Settings: SettingsScreen,
+  UniTvDiagnostic: UniTvDiagnosticScreen,
 };
 
 const NavigatorScreensContext = React.createContext<RootNavigatorScreens>(DEFAULT_SCREENS);
@@ -94,7 +102,7 @@ const NavigatorScreensContext = React.createContext<RootNavigatorScreens>(DEFAUL
 function createScreenSlot<K extends keyof RootNavigatorScreens>(screenKey: K) {
   return function ScreenSlot(props: any): React.JSX.Element {
     const resolved = React.useContext(NavigatorScreensContext);
-    const Component = resolved[screenKey];
+    const Component = resolved[screenKey] ?? DEFAULT_SCREENS[screenKey]!;
     return <Component {...props} />;
   };
 }
@@ -106,6 +114,7 @@ const LibraryTabSlot = createScreenSlot('LibraryTab');
 const AnimeDetailsSlot = createScreenSlot('AnimeDetails');
 const VideoPlayerSlot = createScreenSlot('VideoPlayer');
 const SettingsSlot = createScreenSlot('Settings');
+const UniTvDiagnosticSlot = createScreenSlot('UniTvDiagnostic');
 
 function MainTabsNavigator(): React.JSX.Element {
   return (
@@ -166,6 +175,11 @@ export function RootNavigator(
   props: RootNavigatorProps = {}
 ): React.JSX.Element {
   const { screens, withNavigationContainer = true } = props;
+  const diagnosticEnabled =
+    isUniTvDiagnosticAvailable() || Boolean(screens?.UniTvDiagnostic);
+  const initialRouteName: keyof RootStackParamList =
+    isStandaloneUniTvDiagnosticMode() ? 'UniTvDiagnostic' : 'MainTabs';
+
   const resolvedScreens = React.useMemo<RootNavigatorScreens>(
     () => ({
       HomeTab: screens?.HomeTab ?? DEFAULT_SCREENS.HomeTab,
@@ -175,6 +189,8 @@ export function RootNavigator(
       AnimeDetails: screens?.AnimeDetails ?? DEFAULT_SCREENS.AnimeDetails,
       VideoPlayer: screens?.VideoPlayer ?? DEFAULT_SCREENS.VideoPlayer,
       Settings: screens?.Settings ?? DEFAULT_SCREENS.Settings,
+      UniTvDiagnostic:
+        screens?.UniTvDiagnostic ?? DEFAULT_SCREENS.UniTvDiagnostic,
     }),
     [
       screens?.HomeTab,
@@ -184,13 +200,14 @@ export function RootNavigator(
       screens?.AnimeDetails,
       screens?.VideoPlayer,
       screens?.Settings,
+      screens?.UniTvDiagnostic,
     ]
   );
 
   const stackTree = (
     <NavigatorScreensContext.Provider value={resolvedScreens}>
       <Stack.Navigator
-        initialRouteName="MainTabs"
+        initialRouteName={initialRouteName}
         screenOptions={{
           contentStyle: { backgroundColor: THEME_TOKENS.bg.canvas },
           headerStyle: { backgroundColor: THEME_TOKENS.bg.surface },
@@ -225,6 +242,16 @@ export function RootNavigator(
             title: 'Configurações',
           }}
         />
+        {diagnosticEnabled ? (
+          <Stack.Screen
+            name="UniTvDiagnostic"
+            component={UniTvDiagnosticSlot}
+            options={{
+              presentation: 'fullScreenModal',
+              headerShown: false,
+            }}
+          />
+        ) : null}
       </Stack.Navigator>
     </NavigatorScreensContext.Provider>
   );
