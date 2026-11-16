@@ -9,3 +9,4 @@ ios/
 .env.*
 *.log
 coverage/
+release-apk/
