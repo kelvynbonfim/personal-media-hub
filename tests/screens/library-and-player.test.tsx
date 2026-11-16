@@ -1863,3 +1863,183 @@ describe('Final Fix Wave regressions', () => {
     ]);
   });
 });
+
+
+describe('v1.2.0 RuntimeWebViewBridge hybrid mode', () => {
+  it('promotes visible Sessão UniTV modal on /captcha and resolves verifySession/testConnection without leaking credentials once portal route loads', async () => {
+    const controller = new RuntimeWebViewBridgeController();
+    const { UNSAFE_getByType, getByTestId, queryByTestId } = render(
+      React.createElement(RuntimeWebViewBridgeHost, { controller })
+    );
+
+    const verifyPromise = controller.verifySession('https://www.unitvwebs.com', {
+      username: 'hidden-user',
+      password: 'hidden-password',
+    });
+
+    await waitFor(() => {
+      expect(UNSAFE_getByType(WebView)).toBeTruthy();
+    });
+
+    const bridgeWebView = UNSAFE_getByType(WebView);
+    expect(bridgeWebView.props.source.uri).toBe('https://www.unitvwebs.com');
+    expect(queryByTestId('runtime-bridge-modal')).toBeNull();
+
+    // Simulate landing on /captcha -> promotes modal without unmounting WebView
+    act(() => {
+      bridgeWebView.props.onLoadEnd({
+        nativeEvent: { url: 'https://www.unitvwebs.com/captcha' },
+      });
+      bridgeWebView.props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'BRIDGE_AUTH_STATE',
+            state: 'CAPTCHA',
+            url: 'https://www.unitvwebs.com/captcha',
+          }),
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('runtime-bridge-modal')).toBeTruthy();
+    });
+    expect(UNSAFE_getByType(WebView)).toBe(bridgeWebView);
+    expect(queryByTestId('runtime-bridge-confirm')).toBeTruthy();
+
+    // Simulate user solving CAPTCHA and reaching authenticated catalog route
+    act(() => {
+      bridgeWebView.props.onNavigationStateChange?.({
+        url: 'https://www.unitvwebs.com/vod/uvweb_free/84911',
+      });
+      bridgeWebView.props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'BRIDGE_AUTH_STATE',
+            state: 'AUTHENTICATED',
+            url: 'https://www.unitvwebs.com/vod/uvweb_free/84911',
+          }),
+        },
+      });
+    });
+
+    await expect(verifyPromise).resolves.toEqual({ ok: true });
+    await waitFor(() => {
+      expect(queryByTestId('runtime-bridge-modal')).toBeNull();
+    });
+  });
+
+  it('settles interactive /captcha and searchVod cleanly with USER_CANCELLED when Cancelar is pressed', async () => {
+    const controller = new RuntimeWebViewBridgeController();
+    const { UNSAFE_getByType, getByTestId, queryByTestId } = render(
+      React.createElement(RuntimeWebViewBridgeHost, { controller })
+    );
+
+    const verifyPromise = controller.verifySession('https://www.unitvwebs.com', null);
+
+    await waitFor(() => {
+      expect(UNSAFE_getByType(WebView)).toBeTruthy();
+    });
+
+    act(() => {
+      UNSAFE_getByType(WebView).props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'BRIDGE_AUTH_STATE',
+            state: 'CAPTCHA',
+            url: 'https://www.unitvwebs.com/captcha',
+          }),
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('runtime-bridge-cancel')).toBeTruthy();
+    });
+
+    fireEvent.press(getByTestId('runtime-bridge-cancel'));
+
+    await expect(verifyPromise).resolves.toEqual({
+      errorCode: 'USER_CANCELLED',
+    });
+    await waitFor(() => {
+      expect(queryByTestId('runtime-bridge-modal')).toBeNull();
+    });
+  });
+
+  it('opens Quasar /search/vod modal when direct links are absent and auto-links upon navigating to /vod/details/...', async () => {
+    const controller = new RuntimeWebViewBridgeController();
+    const { UNSAFE_getByType, getByTestId, getByText, queryByTestId } = render(
+      React.createElement(RuntimeWebViewBridgeHost, { controller })
+    );
+
+    const searchPromise = controller.searchVod('https://www.unitvwebs.com', [
+      'Naruto',
+    ]);
+
+    await waitFor(() => {
+      expect(UNSAFE_getByType(WebView)).toBeTruthy();
+    });
+
+    const bridgeWebView = UNSAFE_getByType(WebView);
+    expect(bridgeWebView.props.source.uri).toBe(
+      'https://www.unitvwebs.com/search/vod'
+    );
+
+    act(() => {
+      bridgeWebView.props.onLoadEnd({
+        nativeEvent: { url: 'https://www.unitvwebs.com/search/vod' },
+      });
+      bridgeWebView.props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'BRIDGE_SEARCH_NEEDS_SELECTION',
+            hasCaptcha: false,
+            title: 'UniTV',
+          }),
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(getByTestId('runtime-bridge-modal')).toBeTruthy();
+      expect(getByText(/Selecionar na UniTV/i)).toBeTruthy();
+    });
+
+    // User taps Naruto card -> navigation enters /vod/details/... with extra query token
+    act(() => {
+      bridgeWebView.props.onNavigationStateChange?.({
+        url: 'https://www.unitvwebs.com/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC?token=secret',
+        title: 'Naruto - UniTV',
+      });
+    });
+
+    await expect(searchPromise).resolves.toEqual({
+      vodId: '/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+      watchPath: '/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+      title: 'Naruto',
+    });
+    await waitFor(() => {
+      expect(queryByTestId('runtime-bridge-modal')).toBeNull();
+    });
+  });
+
+  it('settles queued verifySession with USER_CANCELLED on host unmount without dangling callbacks', async () => {
+    const controller = new RuntimeWebViewBridgeController();
+    const { UNSAFE_getByType, unmount } = render(
+      React.createElement(RuntimeWebViewBridgeHost, { controller })
+    );
+
+    const verifyPromise = controller.verifySession('https://www.unitvwebs.com', null);
+
+    await waitFor(() => {
+      expect(UNSAFE_getByType(WebView)).toBeTruthy();
+    });
+
+    unmount();
+
+    await expect(verifyPromise).resolves.toEqual({
+      errorCode: 'USER_CANCELLED',
+    });
+  });
+});
