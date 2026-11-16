@@ -22,13 +22,15 @@ import {
   RootNavigator,
   RootNavigatorScreens,
 } from './src/navigation/RootNavigator';
+import {
+  AutoAnimePlaybackAdapter,
+  fetchAnimeFirePtMetadata,
+} from './src/playback/auto-anime-adapter';
 import { CredentialsStore } from './src/playback/credentials-store';
 import {
   RuntimeWebViewBridgeController,
   RuntimeWebViewBridgeHost,
 } from './src/playback/runtime-webview-bridge';
-import { UniTvPlaybackAdapter } from './src/playback/unitv-adapter';
-import { UniTvProbeResult } from './src/playback/unitv-probe';
 import {
   createSupabaseSyncClient,
   SupabaseSyncEngine,
@@ -74,22 +76,16 @@ async function bootstrapServices(
 
   const libraryRepository = new LibraryRepository(db);
   const backupService = new BackupService(db);
-  const catalogService = new CatalogService(libraryRepository);
+  const catalogService = new CatalogService(libraryRepository, {
+    ptBrFallbackFn: fetchAnimeFirePtMetadata,
+  });
   const credentialsStore = new CredentialsStore();
 
-  const playbackAdapter = new UniTvPlaybackAdapter({
+  const playbackAdapter = new AutoAnimePlaybackAdapter({
     bridge: bridgeController,
     credentialsStore,
     repository: libraryRepository,
-  }) as UniTvPlaybackAdapter & {
-    testConnection?: (params: {
-      portalUrl: string;
-      username: string;
-      password: string;
-    }) => Promise<UniTvProbeResult>;
-  };
-  playbackAdapter.testConnection = (params) =>
-    bridgeController.testConnection(params);
+  });
 
   const syncEngine = createOptionalSyncEngine(db);
 

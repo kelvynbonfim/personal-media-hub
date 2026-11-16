@@ -214,10 +214,15 @@ function applyLocalCatalogFilter(
   return filtered;
 }
 
+export type PtBrMetadataFallbackFn = (
+  media: MediaItemRecord
+) => Promise<{ titlePt?: string | null; synopsisPt?: string | null } | null>;
+
 export interface CatalogServiceDeps {
   aniListClient?: AniListClient;
   jikanClient?: JikanClient;
   tmdbClient?: TmdbClient;
+  ptBrFallbackFn?: PtBrMetadataFallbackFn;
   nowFn?: () => Date;
 }
 
@@ -230,6 +235,7 @@ export class CatalogService {
   private readonly aniListClient: AniListClient;
   private readonly jikanClient: JikanClient;
   private readonly tmdbClient: TmdbClient;
+  private readonly ptBrFallbackFn?: PtBrMetadataFallbackFn;
   private readonly nowFn: () => Date;
   private readonly anilistIdByMediaId = new Map<string, number>();
   private readonly formatByAnilistId = new Map<number, string>();
@@ -241,6 +247,7 @@ export class CatalogService {
     this.aniListClient = deps.aniListClient ?? new AniListHttpClient();
     this.jikanClient = deps.jikanClient ?? new JikanHttpClient();
     this.tmdbClient = deps.tmdbClient ?? new TmdbHttpClient();
+    this.ptBrFallbackFn = deps.ptBrFallbackFn;
     this.nowFn = deps.nowFn ?? (() => new Date());
   }
 
@@ -881,13 +888,44 @@ export class CatalogService {
     return sortableNodes.map((entry) => entry.node);
   }
 
+  private async enrichWithPtFallback(
+    media: MediaItemRecord
+  ): Promise<MediaItemRecord> {
+    if (
+      !this.ptBrFallbackFn ||
+      (media.titlePt && media.titlePt.trim().length > 0)
+    ) {
+      return media;
+    }
+
+    try {
+      const fallback = await this.ptBrFallbackFn(media);
+      const titlePt = fallback?.titlePt?.trim() || null;
+      const synopsisPt = fallback?.synopsisPt?.trim() || null;
+      if (!titlePt && !synopsisPt) {
+        return media;
+      }
+
+      const updated: MediaItemRecord = {
+        ...media,
+        titlePt: titlePt ?? media.titlePt,
+        synopsis: synopsisPt ?? media.synopsis,
+        cachedAt: this.nowFn().toISOString(),
+      };
+      const persisted = await this.upsertAndNormalizeMedia([updated]);
+      return persisted[0] ?? updated;
+    } catch {
+      return media;
+    }
+  }
+
   async enrichWithPortugueseIfConfigured(
     media: MediaItemRecord
   ): Promise<MediaItemRecord> {
     const settings = await this.repo.getSettings();
     const apiKey = settings.tmdbApiKey?.trim() ?? '';
     if (!apiKey) {
-      return media;
+      return this.enrichWithPtFallback(media);
     }
 
     if (media.tmdbId !== null && media.titlePt && media.titlePt.trim().length > 0) {
@@ -907,7 +945,7 @@ export class CatalogService {
       try {
         matches = await this.tmdbClient.searchAnimePtBr(query, apiKey);
       } catch {
-        return media;
+        return this.enrichWithPtFallback(media);
       }
       if (matches.length > 0) {
         break;
@@ -916,7 +954,7 @@ export class CatalogService {
 
     const bestMatch = this.findBestTmdbMatch(media, matches);
     if (!bestMatch) {
-      return media;
+      return this.enrichWithPtFallback(media);
     }
 
     const updated = this.applyTmdbMatchToMedia(media, bestMatch);
