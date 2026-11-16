@@ -628,33 +628,23 @@ export class SupabaseSyncEngine {
     return { mediaToPush, dirtyEntries, dirtyProgress, dirtyHistory, linksToPush };
   }
 
-  private async clearDirtyFlags(bundle: DirtyPushBundle): Promise<void> {
-    if (
-      bundle.dirtyEntries.length === 0 &&
-      bundle.dirtyProgress.length === 0 &&
-      bundle.dirtyHistory.length === 0
-    ) {
-      return;
+  private async clearDirtyFlagsInTransaction(bundle: DirtyPushBundle): Promise<void> {
+    // Match updated_at so edits written locally while push was in flight stay dirty = 1.
+    for (const entry of bundle.dirtyEntries) {
+      await this.db.execute(
+        'UPDATE library_entries SET dirty = 0 WHERE id = ? AND updated_at = ?',
+        [entry.id, entry.updatedAt]
+      );
     }
-
-    await withTransaction(this.db, async () => {
-      // Match updated_at so edits written locally while push was in flight stay dirty = 1.
-      for (const entry of bundle.dirtyEntries) {
-        await this.db.execute(
-          'UPDATE library_entries SET dirty = 0 WHERE id = ? AND updated_at = ?',
-          [entry.id, entry.updatedAt]
-        );
-      }
-      for (const prog of bundle.dirtyProgress) {
-        await this.db.execute(
-          'UPDATE episode_progress SET dirty = 0 WHERE id = ? AND updated_at = ?',
-          [prog.id, prog.updatedAt]
-        );
-      }
-      for (const event of bundle.dirtyHistory) {
-        await this.db.execute('UPDATE watch_history SET dirty = 0 WHERE id = ?', [event.id]);
-      }
-    });
+    for (const prog of bundle.dirtyProgress) {
+      await this.db.execute(
+        'UPDATE episode_progress SET dirty = 0 WHERE id = ? AND updated_at = ?',
+        [prog.id, prog.updatedAt]
+      );
+    }
+    for (const event of bundle.dirtyHistory) {
+      await this.db.execute('UPDATE watch_history SET dirty = 0 WHERE id = ?', [event.id]);
+    }
   }
 
   private async fetchRemoteBundle(
@@ -757,17 +747,40 @@ export class SupabaseSyncEngine {
     return rows.length > 0;
   }
 
+  private async resolveLocalMediaMatch(
+    remoteItem: MediaItemRecord
+  ): Promise<{ existing: MediaItemRecord | null; targetId: string }> {
+    // Match by anilist_id first so local media_items.id is preserved across devices.
+    const byAnilistRows = await this.db.query<RawRow>(
+      'SELECT * FROM media_items WHERE anilist_id = ? LIMIT 1',
+      [remoteItem.anilistId]
+    );
+    const byAnilist = byAnilistRows.length > 0 ? mapMediaItemRow(byAnilistRows[0]) : null;
+    if (byAnilist) {
+      return { existing: byAnilist, targetId: byAnilist.id };
+    }
+
+    const byIdRows = await this.db.query<RawRow>(
+      'SELECT * FROM media_items WHERE id = ? LIMIT 1',
+      [remoteItem.id]
+    );
+    const idMatch = byIdRows.length > 0 ? mapMediaItemRow(byIdRows[0]) : null;
+    if (idMatch) {
+      if (idMatch.anilistId === remoteItem.anilistId) {
+        return { existing: idMatch, targetId: idMatch.id };
+      }
+      return { existing: null, targetId: `anilist:${remoteItem.anilistId}` };
+    }
+
+    return { existing: null, targetId: remoteItem.id };
+  }
+
   private async mergeRemoteMediaItem(
     remoteItem: MediaItemRecord,
     remoteUpdatedAt: string | null,
     remoteToLocalMediaId: Map<string, string>
   ): Promise<boolean> {
-    const existingRows = await this.db.query<RawRow>(
-      'SELECT * FROM media_items WHERE id = ? OR anilist_id = ? LIMIT 1',
-      [remoteItem.id, remoteItem.anilistId]
-    );
-    const existing = existingRows.length > 0 ? mapMediaItemRow(existingRows[0]) : null;
-    const targetId = existing ? existing.id : remoteItem.id;
+    const { existing, targetId } = await this.resolveLocalMediaMatch(remoteItem);
     remoteToLocalMediaId.set(remoteItem.id, targetId);
 
     if (existing) {
@@ -851,6 +864,7 @@ export class SupabaseSyncEngine {
     if (existing && resolveConflictByUpdatedAt(existing, normalized) !== normalized) {
       return false;
     }
+    const targetId = existing ? existing.id : normalized.id;
 
     await this.db.execute(
       `INSERT INTO library_entries (
@@ -868,7 +882,7 @@ export class SupabaseSyncEngine {
         updated_at = excluded.updated_at,
         dirty = 0`,
       [
-        normalized.id,
+        targetId,
         normalized.mediaItemId,
         normalized.status,
         normalized.personalScore,
@@ -900,6 +914,7 @@ export class SupabaseSyncEngine {
     if (existing && resolveConflictByUpdatedAt(existing, normalized) !== normalized) {
       return false;
     }
+    const targetId = existing ? existing.id : normalized.id;
 
     await this.db.execute(
       `INSERT INTO episode_progress (
@@ -914,7 +929,7 @@ export class SupabaseSyncEngine {
         updated_at = excluded.updated_at,
         dirty = 0`,
       [
-        normalized.id,
+        targetId,
         normalized.mediaItemId,
         normalized.episodeNumber,
         normalized.positionSeconds,
@@ -1018,15 +1033,148 @@ export class SupabaseSyncEngine {
     return true;
   }
 
-  private async applyRemoteBundle(
-    bundle: RemotePullBundle,
+  private async resolveWinningPushBundle(
+    localBundle: DirtyPushBundle,
+    remoteBundle: RemotePullBundle
+  ): Promise<DirtyPushBundle> {
+    const remoteToLocalMediaId = new Map<string, string>();
+    const remoteMediaByLocalId = new Map<
+      string,
+      { record: MediaItemRecord; remoteUpdatedAt: string | null }
+    >();
+
+    for (const item of remoteBundle.remoteMediaItems) {
+      const { targetId } = await this.resolveLocalMediaMatch(item.record);
+      remoteToLocalMediaId.set(item.record.id, targetId);
+      remoteMediaByLocalId.set(targetId, item);
+    }
+
+    const resolveId = (rawMediaId: string) =>
+      remoteToLocalMediaId.get(rawMediaId) ?? rawMediaId;
+
+    const remoteEntriesByMediaId = new Map<string, LibraryEntryRecord>();
+    for (const entry of remoteBundle.remoteEntries) {
+      const localMediaId = resolveId(entry.mediaItemId);
+      const normalized: LibraryEntryRecord = { ...entry, mediaItemId: localMediaId };
+      const prev = remoteEntriesByMediaId.get(localMediaId);
+      remoteEntriesByMediaId.set(
+        localMediaId,
+        prev ? resolveConflictByUpdatedAt(prev, normalized) : normalized
+      );
+    }
+
+    const remoteProgressByKey = new Map<string, EpisodeProgressRecord>();
+    for (const prog of remoteBundle.remoteProgress) {
+      const localMediaId = resolveId(prog.mediaItemId);
+      const normalized: EpisodeProgressRecord = { ...prog, mediaItemId: localMediaId };
+      const key = `${localMediaId}::${prog.episodeNumber}`;
+      const prev = remoteProgressByKey.get(key);
+      remoteProgressByKey.set(
+        key,
+        prev ? resolveConflictByUpdatedAt(prev, normalized) : normalized
+      );
+    }
+
+    const remoteHistoryById = new Map<
+      string,
+      { record: WatchHistoryRecord; remoteUpdatedAt: string | null }
+    >();
+    for (const item of remoteBundle.remoteHistory) {
+      remoteHistoryById.set(item.record.id, item);
+    }
+
+    const remoteLinksByMediaId = new Map<
+      string,
+      { record: UniTvLinkRecord; remoteUpdatedAt: string | null }
+    >();
+    for (const item of remoteBundle.remoteLinks) {
+      const localMediaId = resolveId(item.record.mediaItemId);
+      remoteLinksByMediaId.set(localMediaId, item);
+    }
+
+    const dirtyEntries = localBundle.dirtyEntries.filter((localEntry) => {
+      const remote = remoteEntriesByMediaId.get(localEntry.mediaItemId);
+      return !remote || resolveConflictByUpdatedAt(localEntry, remote) === localEntry;
+    });
+
+    const dirtyProgress = localBundle.dirtyProgress.filter((localProg) => {
+      const remote = remoteProgressByKey.get(
+        `${localProg.mediaItemId}::${localProg.episodeNumber}`
+      );
+      return !remote || resolveConflictByUpdatedAt(localProg, remote) === localProg;
+    });
+
+    const dirtyHistory = localBundle.dirtyHistory.filter((localEvent) => {
+      const remote = remoteHistoryById.get(localEvent.id);
+      if (!remote) {
+        return true;
+      }
+      const localComparable = { ...localEvent, updatedAt: localEvent.occurredAt };
+      const remoteComparable = {
+        ...remote.record,
+        updatedAt: remote.remoteUpdatedAt ?? remote.record.occurredAt,
+      };
+      return resolveConflictByUpdatedAt(localComparable, remoteComparable) === localComparable;
+    });
+
+    const linksToPush = localBundle.linksToPush.filter((localLink) => {
+      const remote = remoteLinksByMediaId.get(localLink.mediaItemId);
+      if (!remote) {
+        return true;
+      }
+      const localComparable = { ...localLink, updatedAt: localLink.lastVerifiedAt };
+      const remoteComparable = {
+        ...remote.record,
+        updatedAt: remote.remoteUpdatedAt ?? remote.record.lastVerifiedAt,
+      };
+      return resolveConflictByUpdatedAt(localComparable, remoteComparable) === localComparable;
+    });
+
+    const winningMediaIds = new Set([
+      ...dirtyEntries.map((e) => e.mediaItemId),
+      ...dirtyProgress.map((p) => p.mediaItemId),
+      ...dirtyHistory.map((h) => h.mediaItemId),
+      ...linksToPush.map((l) => l.mediaItemId),
+    ]);
+
+    const mediaToPush: MediaItemRecord[] = [];
+    for (const localMedia of localBundle.mediaToPush) {
+      if (!winningMediaIds.has(localMedia.id)) {
+        continue;
+      }
+      const remote = remoteMediaByLocalId.get(localMedia.id);
+      if (!remote) {
+        mediaToPush.push(localMedia);
+        continue;
+      }
+      const localComparable = { ...localMedia, updatedAt: localMedia.cachedAt };
+      const remoteComparable = {
+        ...remote.record,
+        updatedAt: remote.remoteUpdatedAt ?? remote.record.cachedAt,
+      };
+      if (resolveConflictByUpdatedAt(localComparable, remoteComparable) === localComparable) {
+        mediaToPush.push(localMedia);
+      } else if (remote.record.id !== localMedia.id) {
+        // Remote already holds newer metadata under a different id; ensure FK parent exists for local id.
+        mediaToPush.push({ ...remote.record, id: localMedia.id });
+      }
+    }
+
+    return { mediaToPush, dirtyEntries, dirtyProgress, dirtyHistory, linksToPush };
+  }
+
+  private async commitSyncState(
+    pushedBundle: DirtyPushBundle,
+    remoteBundle: RemotePullBundle,
     syncTimestamp: string
   ): Promise<number> {
     return withTransaction(this.db, async () => {
+      await this.clearDirtyFlagsInTransaction(pushedBundle);
+
       let applied = 0;
       const remoteToLocalMediaId = new Map<string, string>();
 
-      for (const { record, remoteUpdatedAt } of bundle.remoteMediaItems) {
+      for (const { record, remoteUpdatedAt } of remoteBundle.remoteMediaItems) {
         if (await this.mergeRemoteMediaItem(record, remoteUpdatedAt, remoteToLocalMediaId)) {
           applied += 1;
         }
@@ -1037,21 +1185,21 @@ export class SupabaseSyncEngine {
         return (await this.hasLocalMediaItem(resolved)) ? resolved : null;
       };
 
-      for (const entry of bundle.remoteEntries) {
+      for (const entry of remoteBundle.remoteEntries) {
         const resolvedMediaId = await resolveParentId(entry.mediaItemId);
         if (resolvedMediaId && (await this.mergeRemoteLibraryEntry(entry, resolvedMediaId))) {
           applied += 1;
         }
       }
 
-      for (const prog of bundle.remoteProgress) {
+      for (const prog of remoteBundle.remoteProgress) {
         const resolvedMediaId = await resolveParentId(prog.mediaItemId);
         if (resolvedMediaId && (await this.mergeRemoteEpisodeProgress(prog, resolvedMediaId))) {
           applied += 1;
         }
       }
 
-      for (const { record, remoteUpdatedAt } of bundle.remoteHistory) {
+      for (const { record, remoteUpdatedAt } of remoteBundle.remoteHistory) {
         const resolvedMediaId = await resolveParentId(record.mediaItemId);
         if (
           resolvedMediaId &&
@@ -1061,7 +1209,7 @@ export class SupabaseSyncEngine {
         }
       }
 
-      for (const { record, remoteUpdatedAt } of bundle.remoteLinks) {
+      for (const { record, remoteUpdatedAt } of remoteBundle.remoteLinks) {
         const resolvedMediaId = await resolveParentId(record.mediaItemId);
         if (
           resolvedMediaId &&
@@ -1087,29 +1235,51 @@ export class SupabaseSyncEngine {
   private async executeSync(userId: string): Promise<SyncResult> {
     const syncTimestamp = new Date().toISOString();
     const lastSyncAt = await this.loadLastSyncAt();
-    const pushBundle = await this.collectDirtyPushBundle(lastSyncAt);
+    const localBundle = await this.collectDirtyPushBundle(lastSyncAt);
 
-    // Push media_items first for FK integrity, followed by user-owned rows.
+    // Pull first and resolve LWW conflicts before pushing so stale offline edits never overwrite newer remote state.
+    const pullResult = await this.fetchRemoteBundle(userId, lastSyncAt);
+    if (pullResult.errorMessage || !pullResult.bundle) {
+      return {
+        status: 'DEFERRED_OFFLINE_OR_PAUSED',
+        pushedCount: 0,
+        pulledCount: 0,
+        errorMessage: pullResult.errorMessage ?? 'Failed to pull remote updates',
+      };
+    }
+
+    const winningPushBundle = await this.resolveWinningPushBundle(
+      localBundle,
+      pullResult.bundle
+    );
+
+    // Push media_items first for FK integrity, followed by winning user-owned rows.
     const pushBatches: Array<{ table: string; rows: Record<string, unknown>[] }> = [
       {
         table: 'media_items',
-        rows: pushBundle.mediaToPush.map((item) => toRemoteMediaItem(item, userId)),
+        rows: winningPushBundle.mediaToPush.map((item) => toRemoteMediaItem(item, userId)),
       },
       {
         table: 'library_entries',
-        rows: pushBundle.dirtyEntries.map((entry) => toRemoteLibraryEntry(entry, userId)),
+        rows: winningPushBundle.dirtyEntries.map((entry) =>
+          toRemoteLibraryEntry(entry, userId)
+        ),
       },
       {
         table: 'episode_progress',
-        rows: pushBundle.dirtyProgress.map((prog) => toRemoteEpisodeProgress(prog, userId)),
+        rows: winningPushBundle.dirtyProgress.map((prog) =>
+          toRemoteEpisodeProgress(prog, userId)
+        ),
       },
       {
         table: 'watch_history',
-        rows: pushBundle.dirtyHistory.map((event) => toRemoteWatchHistory(event, userId)),
+        rows: winningPushBundle.dirtyHistory.map((event) =>
+          toRemoteWatchHistory(event, userId)
+        ),
       },
       {
         table: 'unitv_links',
-        rows: pushBundle.linksToPush.map((link) => toRemoteUniTvLink(link, userId)),
+        rows: winningPushBundle.linksToPush.map((link) => toRemoteUniTvLink(link, userId)),
       },
     ];
 
@@ -1127,19 +1297,11 @@ export class SupabaseSyncEngine {
       pushedCount += batch.rows.length;
     }
 
-    await this.clearDirtyFlags(pushBundle);
-
-    const pullResult = await this.fetchRemoteBundle(userId, lastSyncAt);
-    if (pullResult.errorMessage || !pullResult.bundle) {
-      return {
-        status: 'DEFERRED_OFFLINE_OR_PAUSED',
-        pushedCount,
-        pulledCount: 0,
-        errorMessage: pullResult.errorMessage ?? 'Failed to pull remote updates',
-      };
-    }
-
-    const pulledCount = await this.applyRemoteBundle(pullResult.bundle, syncTimestamp);
+    const pulledCount = await this.commitSyncState(
+      winningPushBundle,
+      pullResult.bundle,
+      syncTimestamp
+    );
     return {
       status: 'SYNCED',
       pushedCount,

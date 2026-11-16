@@ -229,3 +229,55 @@ drop policy if exists "unitv_links_delete_own" on public.unitv_links;
 create policy "unitv_links_delete_own"
   on public.unitv_links for delete
   using (auth.uid() = user_id);
+
+-- Server-side Last-Write-Wins (LWW) guard: prevent stale offline pushes from overwriting newer remote rows.
+create or replace function public.preserve_newer_sync_record()
+returns trigger
+language plpgsql
+as $$
+begin
+  if tg_table_name = 'watch_history' then
+    if new.occurred_at < old.occurred_at then
+      return old;
+    end if;
+  elsif tg_table_name = 'unitv_links' then
+    if new.last_verified_at < old.last_verified_at then
+      return old;
+    end if;
+  elsif tg_table_name = 'media_items' then
+    if new.cached_at < old.cached_at then
+      return old;
+    end if;
+  else
+    if new.updated_at < old.updated_at then
+      return old;
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists trg_media_items_preserve_newer on public.media_items;
+create trigger trg_media_items_preserve_newer
+  before update on public.media_items
+  for each row execute function public.preserve_newer_sync_record();
+
+drop trigger if exists trg_library_entries_preserve_newer on public.library_entries;
+create trigger trg_library_entries_preserve_newer
+  before update on public.library_entries
+  for each row execute function public.preserve_newer_sync_record();
+
+drop trigger if exists trg_episode_progress_preserve_newer on public.episode_progress;
+create trigger trg_episode_progress_preserve_newer
+  before update on public.episode_progress
+  for each row execute function public.preserve_newer_sync_record();
+
+drop trigger if exists trg_watch_history_preserve_newer on public.watch_history;
+create trigger trg_watch_history_preserve_newer
+  before update on public.watch_history
+  for each row execute function public.preserve_newer_sync_record();
+
+drop trigger if exists trg_unitv_links_preserve_newer on public.unitv_links;
+create trigger trg_unitv_links_preserve_newer
+  before update on public.unitv_links
+  for each row execute function public.preserve_newer_sync_record();
