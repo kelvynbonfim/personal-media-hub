@@ -2213,3 +2213,335 @@ describe('v1.2.0 SettingsScreen & AnimeDetailsScreen interactive UniTV flows', (
     expect(saveUniTvLink).not.toHaveBeenCalled();
   });
 });
+
+
+describe('v1.2.0 VideoPlayerScreen unified HUD over #v-player_html5_api', () => {
+  it('renders unified HUD over CLEAN_WEBVIEW, controls #v-player_html5_api via injectJavaScript, resumes, clamps invalid telemetry, and persists 85% completion', async () => {
+    const media = makeMedia({
+      id: 'anilist:701',
+      anilistId: 701,
+      titlePt: 'Naruto',
+      episodesTotal: 24,
+    });
+    const recordPlaybackProgress = jest.fn(
+      async ({ positionSeconds, durationSeconds }) => ({
+        episodeCompleted: durationSeconds > 0 && positionSeconds / durationSeconds >= 0.85,
+        episodeAutoCompletedNow: false,
+        seasonCompletedPrompt: false,
+      })
+    );
+
+    const services = createMockServices({
+      libraryRepository: {
+        getMediaItemById: jest.fn(async () => media),
+        getSettings: jest.fn(async () => ({
+          ...DEFAULT_APP_SETTINGS,
+          unitvPortalUrl: 'https://www.unitvwebs.com',
+        })),
+        getEpisodeProgressList: jest.fn(async () => [
+          {
+            id: 'ep-prog-2',
+            mediaItemId: media.id,
+            episodeNumber: 2,
+            positionSeconds: 120,
+            durationSeconds: 1450,
+            isCompleted: false,
+            watchedVia: 'APP_PLAYER' as const,
+            updatedAt: '2026-11-16T10:00:00.000Z',
+            dirty: 0,
+          },
+        ]),
+        recordPlaybackProgress,
+      },
+      playbackAdapter: {
+        resolveEpisodePlayback: jest.fn(async () => ({
+          mode: 'CLEAN_WEBVIEW' as const,
+          webViewUrl:
+            'https://www.unitvwebs.com/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+          matchedTitle: 'Naruto',
+          vodId: '/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+        })),
+      },
+    });
+
+    const { getByTestId, getByText } = render(
+      <AppServicesProvider value={services}>
+        <VideoPlayerScreen
+          navigation={{ navigate: jest.fn(), goBack: jest.fn() }}
+          route={{ params: { mediaItemId: media.id, episodeNumber: 2 } }}
+        />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(getByTestId('video-player-webview')).toBeTruthy();
+    });
+
+    const webView = getByTestId('video-player-webview');
+    expect(getByTestId('player-webview-complete-button')).toBeTruthy();
+    expect(getByText('Concluir Episódio ✓')).toBeTruthy();
+    expect(getByTestId('player-play-pause')).toBeTruthy();
+    expect(getByTestId('player-seek-back')).toBeTruthy();
+    expect(getByTestId('player-seek-forward')).toBeTruthy();
+    expect(getByTestId('player-rate-button')).toBeTruthy();
+    expect(getByTestId('player-portal-episodes-toggle')).toBeTruthy();
+
+    // Clamp NaN/zero duration telemetry cleanly
+    act(() => {
+      webView.props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'WEB_PLAYER_STATE',
+            currentTime: Number.NaN,
+            duration: 0,
+            paused: false,
+            ended: false,
+            videoHeight: -5,
+          }),
+        },
+      });
+    });
+
+    expect(getByText('00:00 / 00:00')).toBeTruthy();
+
+    // Receive real #v-player_html5_api telemetry
+    act(() => {
+      webView.props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'WEB_PLAYER_STATE',
+            currentTime: 120,
+            duration: 1450,
+            paused: false,
+            ended: false,
+            videoHeight: 480,
+          }),
+        },
+      });
+    });
+
+    expect(getByText('02:00 / 24:10')).toBeTruthy();
+    expect(getByText('480p')).toBeTruthy();
+
+    // Controls update playback & cross 85% completion
+    fireEvent.press(getByTestId('player-seek-forward'));
+    expect(getByText('02:10 / 24:10')).toBeTruthy();
+
+    fireEvent.press(getByTestId('player-rate-button'));
+    expect(getByText('1.25x')).toBeTruthy();
+
+    fireEvent.press(getByTestId('player-play-pause'));
+    await waitFor(() => {
+      expect(recordPlaybackProgress).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mediaItemId: media.id,
+          episodeNumber: 2,
+          positionSeconds: 130,
+          durationSeconds: 1450,
+        })
+      );
+    });
+
+    // Cross 85% (1250 / 1450)
+    act(() => {
+      webView.props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'WEB_PLAYER_STATE',
+            currentTime: 1250,
+            duration: 1450,
+            paused: false,
+            ended: false,
+            videoHeight: 480,
+          }),
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(getByText(/Concluído \(85%\+\)/)).toBeTruthy();
+    });
+  });
+
+  it('ignores cleartext http:// STREAM_CAPTURED URLs on unitvwebs.com so ExoPlayer 22001 never triggers', async () => {
+    const media = makeMedia({ id: 'anilist:702', anilistId: 702, titlePt: 'Naruto Cleartext' });
+    const services = createMockServices({
+      libraryRepository: {
+        getMediaItemById: jest.fn(async () => media),
+        getSettings: jest.fn(async () => ({
+          ...DEFAULT_APP_SETTINGS,
+          unitvPortalUrl: 'https://www.unitvwebs.com',
+        })),
+      },
+      playbackAdapter: {
+        resolveEpisodePlayback: jest.fn(async () => ({
+          mode: 'CLEAN_WEBVIEW' as const,
+          webViewUrl:
+            'https://www.unitvwebs.com/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+          matchedTitle: 'Naruto Cleartext',
+          vodId: '/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+        })),
+      },
+    });
+
+    const { getByTestId, queryByTestId } = render(
+      <AppServicesProvider value={services}>
+        <VideoPlayerScreen
+          navigation={{ navigate: jest.fn(), goBack: jest.fn() }}
+          route={{ params: { mediaItemId: media.id, episodeNumber: 1 } }}
+        />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(getByTestId('video-player-webview')).toBeTruthy();
+    });
+
+    act(() => {
+      getByTestId('video-player-webview').props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'STREAM_CAPTURED',
+            url: 'http://vod-uvweb2.329wu3569v.com/vod/DD74E140F2C04A998534E5F43C562EEC_media.mp4',
+            headers: { Referer: 'https://www.unitvwebs.com/' },
+          }),
+        },
+      });
+    });
+
+    expect(getByTestId('video-player-webview')).toBeTruthy();
+    expect(queryByTestId('video-player-exo')).toBeNull();
+  });
+
+  it('steps HUD aside on WEB_PLAYER_INTERACTION_REQUIRED and toggles portal episode list cleanly', async () => {
+    const media = makeMedia({ id: 'anilist:703', anilistId: 703, titlePt: 'Naruto Interativo' });
+    const services = createMockServices({
+      libraryRepository: {
+        getMediaItemById: jest.fn(async () => media),
+        getSettings: jest.fn(async () => ({
+          ...DEFAULT_APP_SETTINGS,
+          unitvPortalUrl: 'https://www.unitvwebs.com',
+        })),
+      },
+      playbackAdapter: {
+        resolveEpisodePlayback: jest.fn(async () => ({
+          mode: 'CLEAN_WEBVIEW' as const,
+          webViewUrl:
+            'https://www.unitvwebs.com/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+          matchedTitle: 'Naruto Interativo',
+          vodId: '/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+        })),
+      },
+    });
+
+    const { getByTestId, getByText, queryByTestId } = render(
+      <AppServicesProvider value={services}>
+        <VideoPlayerScreen
+          navigation={{ navigate: jest.fn(), goBack: jest.fn() }}
+          route={{ params: { mediaItemId: media.id, episodeNumber: 1 } }}
+        />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(getByTestId('video-player-webview')).toBeTruthy();
+    });
+
+    // Portal episodes toggle frees HUD overlay
+    fireEvent.press(getByTestId('player-portal-episodes-toggle'));
+    expect(queryByTestId('player-play-pause')).toBeNull();
+    expect(getByText(/Voltar ao Player/i)).toBeTruthy();
+
+    fireEvent.press(getByTestId('player-portal-episodes-toggle'));
+    expect(getByTestId('player-play-pause')).toBeTruthy();
+
+    // Unexpected /captcha mid-playback moves HUD out of the way
+    act(() => {
+      getByTestId('video-player-webview').props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'WEB_PLAYER_INTERACTION_REQUIRED',
+            reason: 'CAPTCHA',
+          }),
+        },
+      });
+    });
+
+    expect(queryByTestId('player-play-pause')).toBeNull();
+    expect(
+      getByText(/Verificação necessária na UniTV/i)
+    ).toBeTruthy();
+
+    // Video state restores HUD automatically
+    act(() => {
+      getByTestId('video-player-webview').props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'WEB_PLAYER_STATE',
+            currentTime: 5,
+            duration: 1400,
+            paused: false,
+            ended: false,
+            videoHeight: 480,
+          }),
+        },
+      });
+    });
+
+    expect(getByTestId('player-play-pause')).toBeTruthy();
+  });
+
+  it('displays dedicated Portuguese error copy for CAPTCHA_REQUIRED and USER_CANCELLED without blaming credentials', async () => {
+    const media = makeMedia({ id: 'anilist:704', anilistId: 704, titlePt: 'Anime Taxonomia' });
+
+    const captchaView = render(
+      <AppServicesProvider
+        value={createMockServices({
+          libraryRepository: { getMediaItemById: jest.fn(async () => media) },
+          playbackAdapter: {
+            resolveEpisodePlayback: jest.fn(async () => ({
+              mode: 'CLEAN_WEBVIEW' as const,
+              errorCode: 'CAPTCHA_REQUIRED' as const,
+            })),
+          },
+        })}
+      >
+        <VideoPlayerScreen
+          navigation={{ navigate: jest.fn(), goBack: jest.fn() }}
+          route={{ params: { mediaItemId: media.id, episodeNumber: 1 } }}
+        />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(captchaView.getByTestId('player-error-state')).toBeTruthy();
+    });
+    expect(captchaView.getByText(/captcha/i)).toBeTruthy();
+    expect(captchaView.queryByText(/Usuário ou senha incorretos/i)).toBeNull();
+
+    const cancelView = render(
+      <AppServicesProvider
+        value={createMockServices({
+          libraryRepository: { getMediaItemById: jest.fn(async () => media) },
+          playbackAdapter: {
+            resolveEpisodePlayback: jest.fn(async () => ({
+              mode: 'CLEAN_WEBVIEW' as const,
+              errorCode: 'USER_CANCELLED' as const,
+            })),
+          },
+        })}
+      >
+        <VideoPlayerScreen
+          navigation={{ navigate: jest.fn(), goBack: jest.fn() }}
+          route={{ params: { mediaItemId: media.id, episodeNumber: 1 } }}
+        />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(cancelView.getByTestId('player-error-state')).toBeTruthy();
+    });
+    expect(cancelView.getByText(/Ação cancelada|cancelada/i)).toBeTruthy();
+    expect(cancelView.queryByText(/Usuário ou senha incorretos/i)).toBeNull();
+  });
+});
