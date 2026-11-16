@@ -203,6 +203,17 @@ export const CLEAN_WEBVIEW_INJECT_SCRIPT = `
       selectEpisode: function (epNumber) {
         var targetText = String(epNumber || '').trim();
         if (!targetText) return false;
+        var paddedText = targetText.length === 1 ? '0' + targetText : targetText;
+        var candidates = [
+          targetText,
+          paddedText,
+          'Ep ' + targetText,
+          'Ep ' + paddedText,
+          'Ep. ' + targetText,
+          'Ep. ' + paddedText,
+          'Episódio ' + targetText,
+          'Episódio ' + paddedText,
+        ];
         var nodes = document.querySelectorAll('a, button, [role="button"], .q-item, .episode-item');
         for (var i = 0; i < nodes.length; i += 1) {
           var el = nodes[i];
@@ -210,12 +221,7 @@ export const CLEAN_WEBVIEW_INJECT_SCRIPT = `
             continue;
           }
           var txt = (el.textContent || '').trim();
-          if (
-            txt === targetText ||
-            txt === 'Ep ' + targetText ||
-            txt === 'Ep. ' + targetText ||
-            txt === 'Episódio ' + targetText
-          ) {
+          if (candidates.indexOf(txt) !== -1) {
             el.click();
             return true;
           }

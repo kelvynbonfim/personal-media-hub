@@ -312,8 +312,8 @@ function buildSearchInjectionScript(
       if (!href || !label) continue;
       if (label.indexOf(target) !== -1 || target.indexOf(label) !== -1) {
         var idMatch = href.match(/\\/(?:vod|watch|anime)\\/([^/?#]+)/i);
-        var detailsHref = href.match(/^(\\/vod\\/details\\/[^/?#]+)/i);
-        var vodId = detailsHref ? detailsHref[1] : (idMatch ? idMatch[1] : href.replace(/[^a-zA-Z0-9_-]/g, ''));
+        var detailsHref = href.match(/(?:https?:\\/\\/[^/?#]+)?(\\/vod\\/details\\/[^\\s?#]+)/i);
+        var vodId = detailsHref ? detailsHref[1].replace(/\\/+$/, '') : (idMatch ? idMatch[1] : href.replace(/[^a-zA-Z0-9_-]/g, ''));
         post({
           type: 'BRIDGE_SEARCH_RESULT',
           match: {

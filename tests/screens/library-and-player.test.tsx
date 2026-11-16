@@ -2545,3 +2545,28 @@ describe('v1.2.0 VideoPlayerScreen unified HUD over #v-player_html5_api', () => 
     expect(cancelView.queryByText(/Usuário ou senha incorretos/i)).toBeNull();
   });
 });
+
+
+describe('v1.2.0 post-review anchor details path regression', () => {
+  it('does not truncate full /vod/details/0/<hash> href paths in generated search injection script', async () => {
+    const controller = new RuntimeWebViewBridgeController();
+    const { UNSAFE_getByType } = render(
+      React.createElement(RuntimeWebViewBridgeHost, { controller })
+    );
+
+    const searchPromise = controller.searchVod('https://www.unitvwebs.com', ['Naruto']);
+    await waitFor(() => {
+      expect(UNSAFE_getByType(WebView)).toBeTruthy();
+    });
+
+    const injectSpy = jest.fn();
+    controller.handleLoadEnd(1, injectSpy, 'https://www.unitvwebs.com/search/vod', 'UniTV');
+    const injectedScript = String(injectSpy.mock.calls[0]?.[0] ?? '');
+    expect(injectedScript).toContain('(\\/vod\\/details\\/[^\\s?#]+)');
+
+    act(() => {
+      controller.cancelInteractiveModal();
+    });
+    await searchPromise;
+  });
+});

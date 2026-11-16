@@ -662,12 +662,17 @@ export function VideoPlayerScreen(
           if (episodeNumber > 1) {
             injectWebViewCommand({ type: 'SELECT_EPISODE', episodeNumber });
           }
-          if (initialResumeSecondsRef.current > 0) {
-            injectWebViewCommand({
-              type: 'SEEK',
-              timeSeconds: initialResumeSecondsRef.current,
-            });
-          }
+        }
+        if (
+          !hasSeekedInitialRef.current &&
+          initialResumeSecondsRef.current > 0 &&
+          safeDur > 0
+        ) {
+          hasSeekedInitialRef.current = true;
+          injectWebViewCommand({
+            type: 'SEEK',
+            timeSeconds: initialResumeSecondsRef.current,
+          });
         }
 
         if (playerMsg.ended) {
