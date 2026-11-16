@@ -40,7 +40,7 @@ export interface Phase2DomSnapshot {
 
 export interface Phase2StreamLogEntry {
   id: string;
-  kind: 'STREAM_CANDIDATE' | 'STREAM_BLOB';
+  kind: 'STREAM_CANDIDATE' | 'STREAM_SEGMENT' | 'STREAM_BLOB';
   sanitizedUrl: string;
   sourceTag: string;
   mimeHint: string | null;
@@ -73,12 +73,43 @@ export type ParsedPhase2WebViewMessage =
       entry: Phase2StreamLogEntry;
       candidate: Phase2StreamCandidate;
     }
+  | { kind: 'STREAM_SEGMENT'; entry: Phase2StreamLogEntry }
   | { kind: 'STREAM_BLOB'; entry: Phase2StreamLogEntry };
 
 const MAX_INPUTS = 15;
 const MAX_ACTIONS = 40;
 const MAX_TEXT_LENGTH = 80;
 const STREAM_EXTENSION_HINT = /\.(m3u8|mp4|mpd)(\b|$)/i;
+const SEGMENT_EXTENSION_HINT = /\.(ts|m4s|aac|vtt|srt|key)(\b|$)/i;
+
+function isPlayableStreamManifest(
+  sanitizedUrl: string,
+  mimeHint: string | null
+): boolean {
+  if (SEGMENT_EXTENSION_HINT.test(sanitizedUrl)) {
+    return false;
+  }
+  if (STREAM_EXTENSION_HINT.test(sanitizedUrl)) {
+    return true;
+  }
+  if (
+    mimeHint &&
+    /(mpegurl|dash\+xml|video\/mp4)/i.test(mimeHint)
+  ) {
+    return true;
+  }
+  try {
+    const pathname = new URL(sanitizedUrl).pathname.toLowerCase();
+    if (pathname.includes('/api/')) {
+      return false;
+    }
+    return /(?:^|\/)(?:master|playlist|manifest)(?:\.[a-z0-9]+)?$/i.test(
+      pathname
+    );
+  } catch {
+    return false;
+  }
+}
 
 export const PHASE2_DOM_INSPECT_SCRIPT = `
 (function () {
@@ -417,6 +448,20 @@ export function parsePhase2WebViewMessage(
     }
 
     const sanitizedUrl = sanitizeDiagnosticUrl(rawUrl);
+    if (!isPlayableStreamManifest(sanitizedUrl, mimeHint)) {
+      return {
+        kind: 'STREAM_SEGMENT',
+        entry: {
+          id,
+          kind: 'STREAM_SEGMENT',
+          sanitizedUrl,
+          sourceTag,
+          mimeHint,
+          timestampIso,
+        },
+      };
+    }
+
     const sanitizedReferer =
       typeof record.referer === 'string' && /^https?:\/\//i.test(record.referer)
         ? sanitizeDiagnosticUrl(record.referer)

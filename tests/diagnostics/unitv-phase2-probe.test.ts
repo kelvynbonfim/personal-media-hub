@@ -137,6 +137,37 @@ describe('unitv-phase2-probe', () => {
       throw new Error('Expected STREAM_BLOB');
     }
     expect(blobParsed.entry.sanitizedUrl).toBe('blob://[redacted]');
+
+    const tsSegmentParsed = parsePhase2WebViewMessage(
+      JSON.stringify({
+        type: 'DIAG_PHASE2_STREAM',
+        url: 'https://cdn.example.com/live/segment_0001.ts?token=seg_secret',
+        referer: 'https://www.unitvwebs.com/vod/details/0/ABC',
+        userAgent: 'AndroidTestUA/1.0',
+        sourceTag: 'xhr',
+        mimeHint: null,
+      })
+    );
+    expect(tsSegmentParsed?.kind).toBe('STREAM_SEGMENT');
+    if (tsSegmentParsed?.kind !== 'STREAM_SEGMENT') {
+      throw new Error('Expected STREAM_SEGMENT');
+    }
+    expect(tsSegmentParsed.entry.sanitizedUrl).toBe(
+      'https://cdn.example.com/live/segment_0001.ts'
+    );
+    expect('candidate' in tsSegmentParsed).toBe(false);
+
+    const apiStatsParsed = parsePhase2WebViewMessage(
+      JSON.stringify({
+        type: 'DIAG_PHASE2_STREAM',
+        url: 'https://www.unitvwebs.com/api/video/stats?uid=123',
+        referer: 'https://www.unitvwebs.com/vod/details/0/ABC',
+        userAgent: 'AndroidTestUA/1.0',
+        sourceTag: 'fetch',
+        mimeHint: null,
+      })
+    );
+    expect(apiStatsParsed?.kind).toBe('STREAM_SEGMENT');
   });
 
   it('formats sanitized Phase 2 report including DOM, stream logs, and ExoPlayer state without tokens', () => {

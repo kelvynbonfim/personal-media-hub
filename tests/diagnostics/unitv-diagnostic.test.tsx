@@ -443,7 +443,7 @@ describe('UniTV WebView Android bounded diagnostic', () => {
       });
     });
 
-    // Arm stream capture and receive candidate with auth token in query
+    // Arm stream capture and receive candidate with auth token in query, followed by .ts segment
     fireEvent.press(getByTestId('diagnostic-arm-stream-button'));
     act(() => {
       boundWebView.props.onMessage({
@@ -458,17 +458,31 @@ describe('UniTV WebView Android bounded diagnostic', () => {
           }),
         },
       });
+      boundWebView.props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'DIAG_PHASE2_STREAM',
+            url: 'https://cdn.unitv.example/ep1/seg_0001.ts?token=seg_secret',
+            referer: 'https://www.unitvwebs.com/vod/details/0/DD04',
+            userAgent: 'AndroidWebViewTest',
+            sourceTag: 'xhr',
+            mimeHint: null,
+          }),
+        },
+      });
     });
 
     const preview = getByTestId('diagnostic-report-preview').props.children as string;
     expect(preview).toContain('https://www.unitvwebs.com/search/vod');
     expect(preview).toContain('search-input');
     expect(preview).toContain('https://cdn.unitv.example/ep1/master.m3u8');
+    expect(preview).toContain('STREAM_SEGMENT');
     expect(preview).not.toContain('secret999');
+    expect(preview).not.toContain('seg_secret');
     expect(preview).not.toContain('secret_sid');
     expect(preview).not.toContain('topsecret');
 
-    // Mount ExoPlayer test player with captured candidate
+    // Mount ExoPlayer test player with manifest candidate (not overwritten by .ts segment)
     fireEvent.press(getByTestId('diagnostic-test-exoplayer-button'));
     const exoVideo = UNSAFE_getByType(Video);
     expect(exoVideo.props.source).toEqual({
@@ -478,6 +492,25 @@ describe('UniTV WebView Android bounded diagnostic', () => {
         'User-Agent': 'AndroidWebViewTest',
       },
     });
+
+    // While ExoPlayer test is active, another manifest capture does not interrupt/replace active Video URI
+    act(() => {
+      boundWebView.props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'DIAG_PHASE2_STREAM',
+            url: 'https://cdn.unitv.example/ep2/master.m3u8?token=other',
+            referer: 'https://www.unitvwebs.com/vod/details/0/DD04',
+            userAgent: 'AndroidWebViewTest',
+            sourceTag: 'fetch',
+            mimeHint: null,
+          }),
+        },
+      });
+    });
+    expect(UNSAFE_getByType(Video).props.source.uri).toBe(
+      'https://cdn.unitv.example/ep1/master.m3u8?token=secret999'
+    );
 
     act(() => {
       exoVideo.props.onLoad({
@@ -513,7 +546,7 @@ describe('UniTV WebView Android bounded diagnostic', () => {
     expect(sharedMessage).toContain('ExoPlayer: PLAYING');
     expect(sharedMessage).not.toContain('secret999');
 
-    // Simulate ExoPlayer error resets safely with sanitized detail
+    // Simulate ExoPlayer error clears stale resolution/duration
     act(() => {
       exoVideo.props.onError({
         error: {
@@ -522,8 +555,18 @@ describe('UniTV WebView Android bounded diagnostic', () => {
         },
       });
     });
-    expect(getByTestId('diagnostic-exoplayer-status').props.children).toContain(
-      'ERROR'
-    );
+    const errorStatus = getByTestId('diagnostic-exoplayer-status').props.children as string;
+    expect(errorStatus).toContain('ERROR');
+    expect(errorStatus).not.toContain('1080p');
+    expect(errorStatus).not.toContain('1420s');
+
+    // Closing ExoPlayer test resets telemetry cleanly
+    fireEvent.press(getByTestId('diagnostic-exoplayer-close'));
+    expect(queryByTestId('diagnostic-exoplayer-video')).toBeNull();
+    const afterClosePreview = getByTestId('diagnostic-report-preview').props
+      .children as string;
+    expect(afterClosePreview).toContain('ExoPlayer: IDLE');
+    expect(afterClosePreview).not.toContain('Erro ExoPlayer:');
+    expect(afterClosePreview).not.toContain('1080p');
   });
 });

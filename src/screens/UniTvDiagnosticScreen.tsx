@@ -180,6 +180,10 @@ export function UniTvDiagnosticScreen(
     createInitialExoPlayerState()
   );
   const [phase2Hint, setPhase2Hint] = React.useState<string | null>(null);
+  const exoTestActiveRef = React.useRef<boolean>(false);
+  const streamCandidateRef = React.useRef<Phase2StreamCandidate | null>(null);
+  exoTestActiveRef.current = exoTestActive;
+  streamCandidateRef.current = streamCandidate;
 
   React.useEffect(() => {
     if (postLoginToolsEnabled && !bridgeLoadedRef.current) {
@@ -383,11 +387,20 @@ export function UniTvDiagnosticScreen(
       }
       setStreamLogs((prev) => [...prev.slice(-19), parsed.entry]);
       if (parsed.kind === 'STREAM_CANDIDATE') {
-        setStreamCandidate(parsed.candidate);
+        if (exoTestActiveRef.current) {
+          setPhase2Hint(
+            'Novo manifest registrado no log enquanto teste ExoPlayer está ativo.'
+          );
+          return;
+        }
+        if (streamCandidateRef.current?.streamUrl !== parsed.candidate.streamUrl) {
+          setStreamCandidate(parsed.candidate);
+          setExoState(createInitialExoPlayerState());
+        }
         setPhase2Hint(
           `Candidato HTTP capturado (${parsed.candidate.sourceTag}): pronto para testar no ExoPlayer.`
         );
-      } else {
+      } else if (parsed.kind === 'STREAM_BLOB') {
         setPhase2Hint(
           'Player reportou blob:/MediaSource (MSE); observe se há manifest .m3u8/.mp4 adicional.'
         );
@@ -437,9 +450,10 @@ export function UniTvDiagnosticScreen(
 
   const handleExoError = React.useCallback((rawEvent: VideoErrorParam) => {
     setExoState((prev) => ({
-      ...prev,
+      ...createInitialExoPlayerState(),
       status: 'ERROR',
       errorDetail: formatSanitizedExoError(rawEvent),
+      manualConfirm: prev.manualConfirm,
     }));
   }, []);
 
@@ -884,7 +898,10 @@ export function UniTvDiagnosticScreen(
                     </Text>
                   </Pressable>
                   <Pressable
-                    onPress={() => setExoTestActive(false)}
+                    onPress={() => {
+                      setExoTestActive(false);
+                      setExoState(createInitialExoPlayerState());
+                    }}
                     accessibilityRole="button"
                     testID="diagnostic-exoplayer-close"
                     style={styles.neutralPill}
