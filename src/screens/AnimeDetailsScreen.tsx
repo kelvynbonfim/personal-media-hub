@@ -13,6 +13,7 @@ import {
 import { FranchiseNode, FranchiseRelationType } from '../catalog/types';
 import { getMediaDisplayTitle } from '../components/MediaPosterCard';
 import {
+  DEFAULT_UNITV_PORTAL_URL,
   EpisodeProgressRecord,
   LibraryEntryRecord,
   MediaItemRecord,
@@ -21,6 +22,7 @@ import {
   WatchStatus,
 } from '../db/schema';
 import { useOptionalAppServices } from '../navigation/AppServicesContext';
+import { buildTitleCandidates } from '../playback/unitv-adapter';
 import { STATUS_META, THEME_TOKENS } from '../theme/tokens';
 import {
   BaseDiscoveryScreenProps,
@@ -90,6 +92,8 @@ export function AnimeDetailsScreen(
     injectedServices,
     contextServices
   );
+  const webViewBridge =
+    injectedServices?.webViewBridge ?? contextServices?.webViewBridge ?? null;
   const servicesReady = Boolean(libraryRepository);
 
   const targetAnilistId = route?.params?.anilistId;
@@ -110,6 +114,7 @@ export function AnimeDetailsScreen(
     React.useState<boolean>(false);
 
   const [linkModalVisible, setLinkModalVisible] = React.useState<boolean>(false);
+  const [linkFeedback, setLinkFeedback] = React.useState<string | null>(null);
   const [linkVodIdInput, setLinkVodIdInput] = React.useState<string>('');
   const [linkTitleInput, setLinkTitleInput] = React.useState<string>('');
   const [linkSeasonTagInput, setLinkSeasonTagInput] = React.useState<string>('');
@@ -145,6 +150,7 @@ export function AnimeDetailsScreen(
     setNotesSavedBanner(false);
     setSeasonCompletedPromptVisible(false);
     setLinkModalVisible(false);
+    setLinkFeedback(null);
     setErrorMessage(null);
   }, [servicesReady, targetAnilistId, targetMediaItemId]);
 
@@ -591,6 +597,7 @@ export function AnimeDetailsScreen(
         ? uniTvLink.preferredAudioOrSub
         : null
     );
+    setLinkFeedback(null);
     setLinkModalVisible(true);
   }, [media, uniTvLink]);
 
@@ -639,6 +646,67 @@ export function AnimeDetailsScreen(
     linkTitleInput,
     linkVodIdInput,
     media,
+    withMediaUpsertRetry,
+  ]);
+
+  const handleInteractiveSearchLink = React.useCallback(async (): Promise<void> => {
+    if (!media || !libraryRepository || !webViewBridge) {
+      return;
+    }
+    setLinkFeedback(null);
+    try {
+      const settings =
+        typeof libraryRepository.getSettings === 'function'
+          ? await libraryRepository.getSettings().catch(() => null)
+          : null;
+      const portalUrl = settings?.unitvPortalUrl || DEFAULT_UNITV_PORTAL_URL;
+      const candidates = buildTitleCandidates(media);
+      const match = await webViewBridge.searchVod(portalUrl, candidates);
+      if (!isMountedRef.current) {
+        return;
+      }
+      if (!match) {
+        setLinkFeedback('Nenhum título selecionado ou encontrado na UniTV.');
+        return;
+      }
+      if ('errorCode' in match) {
+        setLinkFeedback(
+          match.errorCode === 'USER_CANCELLED'
+            ? 'Busca na UniTV cancelada antes de selecionar o anime.'
+            : 'Não foi possível concluir a busca na UniTV.'
+        );
+        return;
+      }
+
+      const record: UniTvLinkRecord = {
+        mediaItemId: media.id,
+        unitvVodId: match.watchPath || match.vodId,
+        unitvTitle: match.title,
+        unitvSeasonTag: linkSeasonTagInput.trim() || null,
+        preferredAudioOrSub: linkAudioPref,
+        lastVerifiedAt: new Date().toISOString(),
+      };
+      await withMediaUpsertRetry(() => libraryRepository.saveUniTvLink(record));
+      if (!isMountedRef.current) {
+        return;
+      }
+      setUniTvLink(record);
+      setLinkModalVisible(false);
+    } catch (error) {
+      if (isMountedRef.current) {
+        setLinkFeedback(
+          error instanceof Error
+            ? error.message
+            : 'Não foi possível buscar vínculo na UniTV.'
+        );
+      }
+    }
+  }, [
+    libraryRepository,
+    linkAudioPref,
+    linkSeasonTagInput,
+    media,
+    webViewBridge,
     withMediaUpsertRetry,
   ]);
 
@@ -1154,6 +1222,9 @@ export function AnimeDetailsScreen(
         <View style={styles.modalBackdrop}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>Vincular manualmente no UniTV</Text>
+            {linkFeedback ? (
+              <Text style={styles.errorText}>{linkFeedback}</Text>
+            ) : null}
 
             <Text style={styles.inputLabel}>ID VOD no UniTV</Text>
             <TextInput
@@ -1214,6 +1285,19 @@ export function AnimeDetailsScreen(
                 );
               })}
             </View>
+
+            {webViewBridge ? (
+              <Pressable
+                onPress={() => void handleInteractiveSearchLink()}
+                accessibilityRole="button"
+                testID="unitv-modal-interactive-search"
+                style={[styles.secondaryButton, { minHeight: 44, justifyContent: 'center' }]}
+              >
+                <Text style={styles.secondaryButtonText}>
+                  Buscar e Vincular na UniTV
+                </Text>
+              </Pressable>
+            ) : null}
 
             <View style={styles.modalActionsRow}>
               <Pressable

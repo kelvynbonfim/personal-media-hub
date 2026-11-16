@@ -118,7 +118,8 @@ function createMockServices(overrides: {
   catalogService?: Partial<CatalogService>;
   backupService?: Partial<BackupService>;
   credentialsStore?: Partial<CredentialsStore>;
-  playbackAdapter?: PlaybackSourceAdapter | null;
+  playbackAdapter?: (PlaybackSourceAdapter & { testConnection?: unknown }) | null;
+  webViewBridge?: { searchVod: jest.Mock; testConnection?: jest.Mock } | null;
   syncEngine?: Partial<SupabaseSyncEngine> | null;
 } = {}): AppServices {
   const libraryRepository = {
@@ -217,6 +218,9 @@ function createMockServices(overrides: {
     catalogService,
     credentialsStore,
     playbackAdapter: overrides.playbackAdapter ?? null,
+    ...(overrides.webViewBridge !== undefined
+      ? { webViewBridge: overrides.webViewBridge as AppServices['webViewBridge'] }
+      : {}),
     syncEngine: (overrides.syncEngine as SupabaseSyncEngine | null | undefined) ?? null,
   };
 }
@@ -2041,5 +2045,171 @@ describe('v1.2.0 RuntimeWebViewBridge hybrid mode', () => {
     await expect(verifyPromise).resolves.toEqual({
       errorCode: 'USER_CANCELLED',
     });
+  });
+});
+
+
+describe('v1.2.0 SettingsScreen & AnimeDetailsScreen interactive UniTV flows', () => {
+  it('invokes playbackAdapter.testConnection even on first-time empty credentials and renders clear WEBVIEW_ONLY OK copy without credential leaks', async () => {
+    const adapterTestConnection = jest.fn(async () => ({
+      status: 'WEBVIEW_ONLY' as const,
+      reason: 'Conexão OK · Sessão UniTV verificada na WebView.',
+    }));
+
+    const services = createMockServices({
+      libraryRepository: {
+        getSettings: jest.fn(async () => ({
+          ...DEFAULT_APP_SETTINGS,
+          unitvPortalUrl: 'https://www.unitvwebs.com',
+        })),
+      },
+      credentialsStore: {
+        getUniTvCredentials: jest.fn(async () => null),
+      },
+      playbackAdapter: {
+        resolveEpisodePlayback: jest.fn(),
+        testConnection: adapterTestConnection,
+      },
+    });
+
+    const { getByTestId, getByText, queryByText } = render(
+      <AppServicesProvider value={services}>
+        <SettingsScreen />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(getByTestId('settings-portal-url-input').props.value).toBe(
+        'https://www.unitvwebs.com'
+      );
+    });
+
+    fireEvent.press(getByTestId('settings-test-connection-button'));
+
+    await waitFor(() => {
+      expect(adapterTestConnection).toHaveBeenCalledWith({
+        portalUrl: 'https://www.unitvwebs.com',
+        username: '',
+        password: '',
+      });
+    });
+
+    await waitFor(() => {
+      expect(
+        getByText(/Conexão OK · Sessão UniTV verificada \(WEBVIEW_ONLY\)/)
+      ).toBeTruthy();
+    });
+    expect(queryByText(/Senha incorreta/i)).toBeNull();
+  });
+
+  it('allows searching and auto-linking /vod/details/... via webViewBridge from AnimeDetailsScreen modal', async () => {
+    const media = makeMedia({
+      id: 'anilist:20',
+      anilistId: 20,
+      titlePt: 'Naruto',
+      titleEnglish: 'Naruto',
+    });
+    const saveUniTvLink = jest.fn(async () => undefined);
+    const searchVod = jest.fn(async () => ({
+      vodId: '/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+      watchPath: '/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+      title: 'Naruto',
+    }));
+
+    const services = createMockServices({
+      libraryRepository: {
+        getMediaItemById: jest.fn(async () => media),
+        getSettings: jest.fn(async () => ({
+          ...DEFAULT_APP_SETTINGS,
+          unitvPortalUrl: 'https://www.unitvwebs.com',
+        })),
+        getUniTvLink: jest.fn(async () => null),
+        saveUniTvLink,
+      },
+      webViewBridge: { searchVod },
+    });
+
+    const { getByTestId, queryByTestId } = render(
+      <AppServicesProvider value={services}>
+        <AnimeDetailsScreen
+          navigation={{ navigate: jest.fn(), goBack: jest.fn() }}
+          route={{ params: { mediaItemId: media.id } }}
+        />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(getByTestId('details-unitv-link-button')).toBeTruthy();
+    });
+
+    fireEvent.press(getByTestId('details-unitv-link-button'));
+
+    await waitFor(() => {
+      expect(getByTestId('unitv-modal-interactive-search')).toBeTruthy();
+    });
+
+    fireEvent.press(getByTestId('unitv-modal-interactive-search'));
+
+    await waitFor(() => {
+      expect(searchVod).toHaveBeenCalledWith(
+        'https://www.unitvwebs.com',
+        expect.arrayContaining(['Naruto'])
+      );
+      expect(saveUniTvLink).toHaveBeenCalledWith(
+        expect.objectContaining({
+          mediaItemId: media.id,
+          unitvVodId: '/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+          unitvTitle: 'Naruto',
+        })
+      );
+    });
+
+    await waitFor(() => {
+      expect(queryByTestId('unitv-modal-save')).toBeNull();
+    });
+  });
+
+  it('handles USER_CANCELLED on interactive link search in AnimeDetailsScreen without saving a link', async () => {
+    const media = makeMedia({
+      id: 'anilist:21',
+      anilistId: 21,
+      titlePt: 'Bleach',
+    });
+    const saveUniTvLink = jest.fn(async () => undefined);
+    const searchVod = jest.fn(async () => ({
+      errorCode: 'USER_CANCELLED' as const,
+    }));
+
+    const services = createMockServices({
+      libraryRepository: {
+        getMediaItemById: jest.fn(async () => media),
+        getUniTvLink: jest.fn(async () => null),
+        saveUniTvLink,
+      },
+      webViewBridge: { searchVod },
+    });
+
+    const { getByTestId, getByText } = render(
+      <AppServicesProvider value={services}>
+        <AnimeDetailsScreen
+          navigation={{ navigate: jest.fn(), goBack: jest.fn() }}
+          route={{ params: { mediaItemId: media.id } }}
+        />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(getByTestId('details-unitv-link-button')).toBeTruthy();
+    });
+    fireEvent.press(getByTestId('details-unitv-link-button'));
+    await waitFor(() => {
+      expect(getByTestId('unitv-modal-interactive-search')).toBeTruthy();
+    });
+    fireEvent.press(getByTestId('unitv-modal-interactive-search'));
+
+    await waitFor(() => {
+      expect(getByText(/Busca na UniTV cancelada/i)).toBeTruthy();
+    });
+    expect(saveUniTvLink).not.toHaveBeenCalled();
   });
 });

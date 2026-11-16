@@ -62,7 +62,7 @@ function formatProbeFeedback(result: UniTvProbeResult): {
   }
   if (result.status === 'WEBVIEW_ONLY') {
     return {
-      headline: 'Sessão autenticada · Fallback WebView limpa (WEBVIEW_ONLY)',
+      headline: 'Conexão OK · Sessão UniTV verificada (WEBVIEW_ONLY)',
       detail: result.reason,
       isError: false,
     };
@@ -328,7 +328,10 @@ export function SettingsScreen(
     setErrorMessage(null);
 
     try {
-      const normalizedUrl = buildPortalUrl(portalUrlInput.trim(), '');
+      const normalizedUrl = buildPortalUrl(
+        portalUrlInput.trim() || DEFAULT_UNITV_PORTAL_URL,
+        ''
+      );
       const storedCreds =
         !usernameInput.trim() && credentialsStore
           ? await credentialsStore.getUniTvCredentials().catch(() => null)

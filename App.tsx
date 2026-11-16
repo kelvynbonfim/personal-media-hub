@@ -94,6 +94,7 @@ async function bootstrapServices(
     catalogService,
     credentialsStore,
     playbackAdapter,
+    webViewBridge: bridgeController,
     syncEngine,
   };
 }

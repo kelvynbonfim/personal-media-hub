@@ -4,6 +4,7 @@ import { BackupService } from '../db/backup-service';
 import { LibraryRepository } from '../db/library-repository';
 import { DatabaseAdapter } from '../db/schema';
 import { CredentialsStore } from '../playback/credentials-store';
+import type { RuntimeWebViewBridgeController } from '../playback/runtime-webview-bridge';
 import { PlaybackSourceAdapter } from '../playback/types';
 import { SupabaseSyncEngine } from '../sync/supabase-sync';
 
@@ -15,6 +16,10 @@ export interface AppServices {
   credentialsStore: CredentialsStore;
   syncEngine?: SupabaseSyncEngine | null;
   playbackAdapter?: PlaybackSourceAdapter | null;
+  webViewBridge?: Pick<
+    RuntimeWebViewBridgeController,
+    'searchVod' | 'testConnection'
+  > | null;
 }
 
 export const AppServicesContext = React.createContext<AppServices | null>(null);
