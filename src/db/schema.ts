@@ -17,7 +17,7 @@ export const WATCH_STATUSES: readonly WatchStatus[] = [
   'REWATCHING',
 ] as const;
 
-export const DEFAULT_UNITV_PORTAL_URL = 'https://www.uvwebs.info';
+export const DEFAULT_UNITV_PORTAL_URL = 'https://www.unitvwebs.com';
 
 export interface MediaItemRecord {
   id: string;
@@ -174,7 +174,7 @@ const SCHEMA_STATEMENTS: readonly string[] = [
   );`,
   `CREATE TABLE IF NOT EXISTS app_settings (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    unitv_portal_url TEXT NOT NULL DEFAULT 'https://www.uvwebs.info',
+    unitv_portal_url TEXT NOT NULL DEFAULT 'https://www.unitvwebs.com',
     prefer_max_quality INTEGER NOT NULL DEFAULT 1,
     hide_completed_in_explore INTEGER NOT NULL DEFAULT 0,
     tmdb_api_key TEXT,
@@ -194,7 +194,10 @@ const SCHEMA_STATEMENTS: readonly string[] = [
     hide_completed_in_explore,
     tmdb_api_key,
     last_sync_at
-  ) VALUES (1, 'https://www.uvwebs.info', 1, 0, NULL, NULL);`,
+  ) VALUES (1, 'https://www.unitvwebs.com', 1, 0, NULL, NULL);`,
+  `UPDATE app_settings
+     SET unitv_portal_url = 'https://www.unitvwebs.com'
+   WHERE LOWER(unitv_portal_url) LIKE '%uvwebs.info%';`,
 ];
 
 export async function initializeDatabase(db: DatabaseAdapter): Promise<void> {

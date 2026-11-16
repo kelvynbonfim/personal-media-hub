@@ -5,7 +5,9 @@ export type PlaybackMode = 'EXOPLAYER_HLS' | 'CLEAN_WEBVIEW';
 export type PlaybackErrorCode =
   | 'CONCURRENT_SCREEN_LIMIT'
   | 'NOT_FOUND_IN_CATALOG'
-  | 'AUTH_FAILED';
+  | 'AUTH_FAILED'
+  | 'CAPTCHA_REQUIRED'
+  | 'USER_CANCELLED';
 
 export interface PlaybackResolution {
   mode: PlaybackMode;

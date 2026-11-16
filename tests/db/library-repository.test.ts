@@ -114,7 +114,7 @@ describe('LibraryRepository & BackupService', () => {
   it('initializes default app_settings and supports partial settings updates', async () => {
     const defaults = await repo.getSettings();
     expect(defaults).toEqual<AppSettingsRecord>({
-      unitvPortalUrl: 'https://www.uvwebs.info',
+      unitvPortalUrl: 'https://www.unitvwebs.com',
       preferMaxQuality: true,
       hideCompletedInExplore: false,
       tmdbApiKey: null,
@@ -137,6 +137,22 @@ describe('LibraryRepository & BackupService', () => {
 
     const clearedKey = await repo.saveSettings({ tmdbApiKey: null });
     expect(clearedKey.tmdbApiKey).toBeNull();
+  });
+
+  it('migrates legacy uvwebs.info rows to https://www.unitvwebs.com while preserving custom portal URLs', async () => {
+    await adapter.execute(
+      `UPDATE app_settings SET unitv_portal_url = 'https://www.uvwebs.info' WHERE id = 1;`
+    );
+    await initializeDatabase(adapter);
+    expect((await repo.getSettings()).unitvPortalUrl).toBe(
+      'https://www.unitvwebs.com'
+    );
+
+    await repo.saveSettings({ unitvPortalUrl: 'https://mirror.custom.example' });
+    await initializeDatabase(adapter);
+    expect((await repo.getSettings()).unitvPortalUrl).toBe(
+      'https://mirror.custom.example'
+    );
   });
 
   it('wraps expo-sqlite SQLiteDatabase cleanly via createExpoSqliteAdapter', async () => {

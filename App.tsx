@@ -23,10 +23,7 @@ import {
   RootNavigator,
   RootNavigatorScreens,
 } from './src/navigation/RootNavigator';
-import {
-  AutoAnimePlaybackAdapter,
-  fetchAnimeFirePtMetadata,
-} from './src/playback/auto-anime-adapter';
+import { UniTvPlaybackAdapter } from './src/playback/unitv-adapter';
 import { CredentialsStore } from './src/playback/credentials-store';
 import {
   RuntimeWebViewBridgeController,
@@ -79,12 +76,10 @@ async function bootstrapServices(
 
   const libraryRepository = new LibraryRepository(db);
   const backupService = new BackupService(db);
-  const catalogService = new CatalogService(libraryRepository, {
-    ptBrFallbackFn: fetchAnimeFirePtMetadata,
-  });
+  const catalogService = new CatalogService(libraryRepository);
   const credentialsStore = new CredentialsStore();
 
-  const playbackAdapter = new AutoAnimePlaybackAdapter({
+  const playbackAdapter = new UniTvPlaybackAdapter({
     bridge: bridgeController,
     credentialsStore,
     repository: libraryRepository,
