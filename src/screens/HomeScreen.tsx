@@ -119,12 +119,9 @@ function computeResumeInfo(
   };
 }
 
-function buildContinueWatchingList(
-  activeWithMedia: Array<LibraryEntryRecord & { media: MediaItemRecord }>,
-  allEntries: LibraryEntryRecord[],
-  feedMedia: Array<MediaItemRecord | null>,
+function groupProgressByMediaId(
   allProgress: EpisodeProgressRecord[]
-): ContinueWatchingItem[] {
+): Map<string, EpisodeProgressRecord[]> {
   const progressByMediaId = new Map<string, EpisodeProgressRecord[]>();
   for (const row of allProgress) {
     const existing = progressByMediaId.get(row.mediaItemId);
@@ -134,6 +131,15 @@ function buildContinueWatchingList(
       progressByMediaId.set(row.mediaItemId, [row]);
     }
   }
+  return progressByMediaId;
+}
+
+function buildContinueWatchingList(
+  activeWithMedia: Array<LibraryEntryRecord & { media: MediaItemRecord }>,
+  allEntries: LibraryEntryRecord[],
+  feedMedia: Array<MediaItemRecord | null>,
+  progressByMediaId: Map<string, EpisodeProgressRecord[]>
+): ContinueWatchingItem[] {
 
   const combined = new Map<
     string,
@@ -195,6 +201,9 @@ export function HomeScreen(props: HomeScreenProps = {}): React.JSX.Element {
     []
   );
   const [userEntries, setUserEntries] = React.useState<LibraryEntryRecord[]>([]);
+  const [progressByMediaId, setProgressByMediaId] = React.useState<
+    Map<string, EpisodeProgressRecord[]>
+  >(() => new Map());
   const [addingHero, setAddingHero] = React.useState<boolean>(false);
 
   const isMountedRef = React.useRef<boolean>(true);
@@ -238,12 +247,13 @@ export function HomeScreen(props: HomeScreenProps = {}): React.JSX.Element {
           return;
         }
 
+        const progressMap = groupProgressByMediaId(allProgress);
         const activeWithMedia = [...watchingEntries, ...rewatchingEntries];
         const continueList = buildContinueWatchingList(
           activeWithMedia,
           entries,
           [feed.hero, ...feed.trendingMonth, ...feed.currentSeason],
-          allProgress
+          progressMap
         );
 
         const flattenedWeekly = weeklyMap
@@ -254,6 +264,7 @@ export function HomeScreen(props: HomeScreenProps = {}): React.JSX.Element {
           : [];
 
         setUserEntries(entries);
+        setProgressByMediaId(progressMap);
         setHero(feed.hero);
         setTrendingMonth(feed.trendingMonth);
         setCurrentSeason(feed.currentSeason);
@@ -312,7 +323,11 @@ export function HomeScreen(props: HomeScreenProps = {}): React.JSX.Element {
   const heroResumeEpisode = heroContinueItem
     ? heroContinueItem.episodeNumber
     : heroEntry
-      ? computeResumeInfo(heroEntry, hero!, []).episodeNumber
+      ? computeResumeInfo(
+          heroEntry,
+          hero!,
+          progressByMediaId.get(hero!.id) ?? []
+        ).episodeNumber
       : 1;
 
   const handleAddHeroToList = React.useCallback(async (): Promise<void> => {

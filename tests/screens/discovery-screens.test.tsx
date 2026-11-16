@@ -116,6 +116,10 @@ function createMockServices(overrides: {
     getLibraryByStatus: jest.fn(async () => []),
     getAllEpisodeProgress: jest.fn(async () => []),
     getSettings: jest.fn(async (): Promise<AppSettingsRecord> => ({ ...DEFAULT_APP_SETTINGS })),
+    saveSettings: jest.fn(async (patch: Partial<AppSettingsRecord>): Promise<AppSettingsRecord> => ({
+      ...DEFAULT_APP_SETTINGS,
+      ...patch,
+    })),
     setLibraryStatus: jest.fn(async (mediaItemId: string, status: LibraryEntryRecord['status']) =>
       makeLibraryEntry(mediaItemId, { status })
     ),
@@ -335,6 +339,92 @@ describe('HomeScreen', () => {
     });
     expect(getHomeFeed).toHaveBeenCalledTimes(2);
   });
+
+  it('resumes an uncompleted in-progress episode on Hero and Continuar Assistindo without skipping ahead when currentEpisode matches', async () => {
+    const frieren = makeMedia({
+      id: 'anilist:154587',
+      anilistId: 154587,
+      titlePt: 'Frieren',
+      episodesTotal: 28,
+    });
+
+    const watchingWithMatchingEp = makeLibraryEntry(frieren.id, {
+      status: 'WATCHING',
+      currentEpisode: 6,
+    });
+    const pausedWithMatchingEp = makeLibraryEntry(frieren.id, {
+      status: 'PAUSED',
+      currentEpisode: 6,
+    });
+    const ep6Progress = makeEpisodeProgress(frieren.id, 6, {
+      positionSeconds: 580,
+      durationSeconds: 1440,
+      isCompleted: false,
+    });
+
+    const watchingNavigate = jest.fn();
+    const watchingServices = createMockServices({
+      libraryRepository: {
+        getAllLibraryEntries: jest.fn(async () => [watchingWithMatchingEp]),
+        getLibraryByStatus: jest.fn(async (status) =>
+          status === 'WATCHING' ? [{ ...watchingWithMatchingEp, media: frieren }] : []
+        ),
+        getAllEpisodeProgress: jest.fn(async () => [ep6Progress]),
+      },
+      catalogService: {
+        getHomeFeed: jest.fn(async () => ({
+          hero: frieren,
+          trendingMonth: [frieren],
+          currentSeason: [],
+        })),
+      },
+    });
+
+    const watchingRender = render(
+      <HomeScreen services={watchingServices} navigation={{ navigate: watchingNavigate }} />
+    );
+
+    await waitFor(() => {
+      expect(watchingRender.getByText('▶ Continuar Ep. 6')).toBeTruthy();
+    });
+    expect(watchingRender.getByText('Ep. 6')).toBeTruthy();
+    expect(watchingRender.getByText('15 min restantes')).toBeTruthy();
+
+    fireEvent.press(watchingRender.getByTestId('home-hero-cta'));
+    expect(watchingNavigate).toHaveBeenCalledWith('VideoPlayer', {
+      mediaItemId: frieren.id,
+      episodeNumber: 6,
+    });
+
+    const pausedNavigate = jest.fn();
+    const pausedServices = createMockServices({
+      libraryRepository: {
+        getAllLibraryEntries: jest.fn(async () => [pausedWithMatchingEp]),
+        getAllEpisodeProgress: jest.fn(async () => [ep6Progress]),
+      },
+      catalogService: {
+        getHomeFeed: jest.fn(async () => ({
+          hero: frieren,
+          trendingMonth: [frieren],
+          currentSeason: [],
+        })),
+      },
+    });
+
+    const pausedRender = render(
+      <HomeScreen services={pausedServices} navigation={{ navigate: pausedNavigate }} />
+    );
+
+    await waitFor(() => {
+      expect(pausedRender.getByText('▶ Assistir Ep. 6')).toBeTruthy();
+    });
+
+    fireEvent.press(pausedRender.getByTestId('home-hero-cta'));
+    expect(pausedNavigate).toHaveBeenCalledWith('VideoPlayer', {
+      mediaItemId: frieren.id,
+      episodeNumber: 6,
+    });
+  });
 });
 
 describe('ExploreScreen', () => {
@@ -547,6 +637,115 @@ describe('ExploreScreen', () => {
       anilistId: spyFamily.anilistId,
       mediaItemId: spyFamily.id,
     });
+  });
+
+  it('waits for initial hideCompletedInExplore setting for a single initial fetch, persists switch toggles via saveSettings, and preserves user toggles against late getSettings resolution', async () => {
+    const completedItem = makeMedia({
+      id: 'anilist:801',
+      anilistId: 801,
+      titlePt: 'Anime Já Visto',
+    });
+    const activeItem = makeMedia({
+      id: 'anilist:802',
+      anilistId: 802,
+      titlePt: 'Anime Novo',
+    });
+
+    const exploreCatalog = jest.fn(async (filter, completedIds: Set<string>) => {
+      const items = [completedItem, activeItem];
+      return filter.hideCompleted
+        ? items.filter((item) => !completedIds.has(item.id))
+        : items;
+    });
+    const saveSettings = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('Disk write transient failure'))
+      .mockResolvedValue({ ...DEFAULT_APP_SETTINGS, hideCompletedInExplore: true });
+
+    let resolveDeferredSettings!: (value: AppSettingsRecord) => void;
+    const deferredSettingsPromise = new Promise<AppSettingsRecord>((resolve) => {
+      resolveDeferredSettings = resolve;
+    });
+
+    // 1) Initial load with persisted hideCompletedInExplore: true runs exactly ONE fetch
+    const firstServices = createMockServices({
+      libraryRepository: {
+        getAllLibraryEntries: jest.fn(async () => [
+          makeLibraryEntry(completedItem.id, { status: 'COMPLETED' }),
+        ]),
+        getSettings: jest.fn(async () => ({
+          ...DEFAULT_APP_SETTINGS,
+          hideCompletedInExplore: true,
+        })),
+        saveSettings,
+      },
+      catalogService: { exploreCatalog },
+    });
+
+    const firstRender = render(
+      <ExploreScreen services={firstServices} navigation={{ navigate: jest.fn() }} />
+    );
+
+    await waitFor(() => {
+      expect(exploreCatalog).toHaveBeenCalledTimes(1);
+    });
+    expect(exploreCatalog).toHaveBeenCalledWith(
+      expect.objectContaining({ hideCompleted: true }),
+      expect.any(Set)
+    );
+    expect(firstRender.queryByText('Anime Já Visto')).toBeNull();
+    expect(firstRender.getByText('Anime Novo')).toBeTruthy();
+
+    // Toggling persists via saveSettings and survives persistence error gracefully
+    fireEvent(firstRender.getByTestId('explore-hide-completed-switch'), 'valueChange', false);
+
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalledWith({ hideCompletedInExplore: false });
+      expect(firstRender.getByText('Anime Já Visto')).toBeTruthy();
+    });
+
+    fireEvent(firstRender.getByTestId('explore-hide-completed-switch'), 'valueChange', true);
+    await waitFor(() => {
+      expect(saveSettings).toHaveBeenCalledWith({ hideCompletedInExplore: true });
+    });
+
+    firstRender.unmount();
+
+    // 2) Manual toggle made before deferred getSettings resolves is NOT overwritten
+    const exploreCatalogSecond = jest.fn(async () => [completedItem, activeItem]);
+    const raceServices = createMockServices({
+      libraryRepository: {
+        getSettings: jest.fn(() => deferredSettingsPromise),
+        saveSettings: jest.fn(async () => ({
+          ...DEFAULT_APP_SETTINGS,
+          hideCompletedInExplore: false,
+        })),
+      },
+      catalogService: { exploreCatalog: exploreCatalogSecond },
+    });
+
+    const secondRender = render(
+      <ExploreScreen services={raceServices} navigation={{ navigate: jest.fn() }} />
+    );
+
+    // User toggles switch to false explicitly while deferred getSettings (which returns true) is still pending
+    fireEvent(secondRender.getByTestId('explore-hide-completed-switch'), 'valueChange', false);
+
+    await act(async () => {
+      resolveDeferredSettings({
+        ...DEFAULT_APP_SETTINGS,
+        hideCompletedInExplore: true,
+      });
+    });
+
+    await waitFor(() => {
+      expect(exploreCatalogSecond).toHaveBeenCalledTimes(1);
+    });
+    expect(secondRender.getByTestId('explore-hide-completed-switch').props.value).toBe(false);
+    expect(exploreCatalogSecond).toHaveBeenLastCalledWith(
+      expect.objectContaining({ hideCompleted: false }),
+      expect.any(Set)
+    );
   });
 });
 

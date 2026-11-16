@@ -121,6 +121,7 @@ export function ExploreScreen(props: ExploreScreenProps = {}): React.JSX.Element
   const userEntriesRef = React.useRef<LibraryEntryRecord[]>([]);
   const requestSeqRef = React.useRef<number>(0);
   const hasLoadedOnceRef = React.useRef<boolean>(false);
+  const userToggledHideCompletedRef = React.useRef<boolean>(false);
 
   React.useEffect(() => {
     isMountedRef.current = true;
@@ -169,7 +170,7 @@ export function ExploreScreen(props: ExploreScreenProps = {}): React.JSX.Element
         }
         userEntriesRef.current = entries;
         setUserEntries(entries);
-        if (settings) {
+        if (settings && !userToggledHideCompletedRef.current) {
           setHideCompleted(settings.hideCompletedInExplore);
         }
         setBootstrapped(true);
@@ -201,12 +202,19 @@ export function ExploreScreen(props: ExploreScreenProps = {}): React.JSX.Element
       if (!hasLoadedOnceRef.current) {
         return;
       }
-      void libraryRepository
-        .getAllLibraryEntries()
-        .then((entries) => {
-          if (isMountedRef.current) {
-            userEntriesRef.current = entries;
-            setUserEntries(entries);
+      const settingsPromise =
+        typeof libraryRepository.getSettings === 'function'
+          ? libraryRepository.getSettings().catch(() => null)
+          : Promise.resolve(null);
+      void Promise.all([libraryRepository.getAllLibraryEntries(), settingsPromise])
+        .then(([entries, settings]) => {
+          if (!isMountedRef.current) {
+            return;
+          }
+          userEntriesRef.current = entries;
+          setUserEntries(entries);
+          if (settings) {
+            setHideCompleted(settings.hideCompletedInExplore);
           }
         })
         .catch(() => undefined);
@@ -284,6 +292,19 @@ export function ExploreScreen(props: ExploreScreenProps = {}): React.JSX.Element
       prev.includes(genre) ? prev.filter((item) => item !== genre) : [...prev, genre]
     );
   }, []);
+
+  const handleToggleHideCompleted = React.useCallback(
+    (nextValue: boolean) => {
+      userToggledHideCompletedRef.current = true;
+      setHideCompleted(nextValue);
+      if (libraryRepository && typeof libraryRepository.saveSettings === 'function') {
+        void libraryRepository
+          .saveSettings({ hideCompletedInExplore: nextValue })
+          .catch(() => undefined);
+      }
+    },
+    [libraryRepository]
+  );
 
   const handleSelectQuickStatus = React.useCallback(
     async (status: WatchStatus): Promise<void> => {
@@ -392,7 +413,7 @@ export function ExploreScreen(props: ExploreScreenProps = {}): React.JSX.Element
               <Text style={styles.toggleLabel}>Ocultar já concluídos</Text>
               <Switch
                 value={hideCompleted}
-                onValueChange={setHideCompleted}
+                onValueChange={handleToggleHideCompleted}
                 testID="explore-hide-completed-switch"
                 trackColor={{
                   false: THEME_TOKENS.border.subtle,
