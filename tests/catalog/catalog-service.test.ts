@@ -670,6 +670,141 @@ describe('CatalogService & API Clients', () => {
         'Após derrotar o Rei Demônio, a maga elfa Frieren reflete sobre a vida.'
       );
     });
+
+    it('never mis-enriches spin-offs, movies, or same-keyword anime at results[1..N] via shared token overlap alone', async () => {
+      await repo.saveSettings({ tmdbApiKey: 'tmdb-free-key-123' });
+
+      const jjkTv = makeMediaItem({
+        anilistId: 113415,
+        titleRomaji: 'Jujutsu Kaisen',
+        titleEnglish: 'JUJUTSU KAISEN',
+        titlePt: null,
+        seasonYear: 2020,
+        synopsis: 'Original TV synopsis.',
+      });
+      const jjkZero = makeMediaItem({
+        anilistId: 131573,
+        titleRomaji: 'Jujutsu Kaisen 0',
+        titleEnglish: 'JUJUTSU KAISEN 0',
+        titlePt: null,
+        seasonYear: 2021,
+        synopsis: 'Prequel movie synopsis.',
+      });
+      const jjkMiniSpinOff = makeMediaItem({
+        anilistId: 131999,
+        titleRomaji: 'Jujutsu Kaisen Mini Spin-Off',
+        titleEnglish: 'Jujutsu Kaisen Mini Spin-Off',
+        titlePt: null,
+        seasonYear: 2021,
+        synopsis: 'Short ONA synopsis.',
+      });
+
+      const dbz = makeMediaItem({
+        anilistId: 813,
+        titleRomaji: 'Dragon Ball Z',
+        titleEnglish: 'Dragon Ball Z',
+        titlePt: null,
+        seasonYear: 1989,
+        synopsis: 'Saiyan saga synopsis.',
+      });
+      const dragonQuest = makeMediaItem({
+        anilistId: 2229,
+        titleRomaji: 'Dragon Quest: Abel Yuusha',
+        titleEnglish: 'Dragon Quest',
+        titlePt: null,
+        seasonYear: 1989,
+        synopsis: 'Abel RPG adventure synopsis.',
+      });
+
+      const service = new CatalogService(repo, {
+        aniListClient: createStubAniList({
+          searchCatalog: jest.fn(async (filter: CatalogFilter) => {
+            if (filter.query === 'Jujutsu Kaisen') {
+              return [jjkTv, jjkZero, jjkMiniSpinOff];
+            }
+            if (filter.query === 'Dragon') {
+              return [dbz, dragonQuest];
+            }
+            return [];
+          }),
+        }),
+        jikanClient: createStubJikan(),
+        tmdbClient: createStubTmdb({
+          searchAnimePtBr: jest.fn(async (query: string) => {
+            if (query === 'Jujutsu Kaisen') {
+              return [
+                {
+                  tmdbId: 95479,
+                  titlePt: 'Jujutsu Kaisen',
+                  originalTitle: '呪術廻戦',
+                  overviewPt: 'Yuji engole o dedo de Sukuna.',
+                  mediaType: 'tv' as const,
+                  originalLanguage: 'ja',
+                  releaseYear: 2020,
+                },
+                {
+                  tmdbId: 810693,
+                  titlePt: 'Jujutsu Kaisen 0',
+                  originalTitle: '劇場版 呪術廻戦 0',
+                  overviewPt: 'Yuta Okkotsu controla Rika.',
+                  mediaType: 'movie' as const,
+                  originalLanguage: 'ja',
+                  releaseYear: 2021,
+                },
+              ];
+            }
+            if (query === 'Dragon') {
+              return [
+                {
+                  tmdbId: 12971,
+                  titlePt: 'Dragon Ball Z',
+                  originalTitle: 'ドラゴンボールZ',
+                  overviewPt: 'As aventuras de Goku.',
+                  mediaType: 'tv' as const,
+                  originalLanguage: 'ja',
+                  releaseYear: 1989,
+                },
+              ];
+            }
+            return [];
+          }),
+        }),
+      });
+
+      const jjkResults = await service.exploreCatalog({ query: 'Jujutsu Kaisen' }, new Set());
+      expect(jjkResults[0]).toMatchObject({
+        anilistId: 113415,
+        tmdbId: 95479,
+        titlePt: 'Jujutsu Kaisen',
+        synopsis: 'Yuji engole o dedo de Sukuna.',
+      });
+      expect(jjkResults[1]).toMatchObject({
+        anilistId: 131573,
+        tmdbId: 810693,
+        titlePt: 'Jujutsu Kaisen 0',
+        synopsis: 'Yuta Okkotsu controla Rika.',
+      });
+      expect(jjkResults[2]).toMatchObject({
+        anilistId: 131999,
+        tmdbId: null,
+        titlePt: null,
+        synopsis: 'Short ONA synopsis.',
+      });
+
+      const savedSpinOff = await repo.getMediaItemByAnilistId(131999);
+      expect(savedSpinOff?.tmdbId).toBeNull();
+      expect(savedSpinOff?.titlePt).toBeNull();
+      expect(savedSpinOff?.synopsis).toBe('Short ONA synopsis.');
+
+      const dragonResults = await service.exploreCatalog({ query: 'Dragon' }, new Set());
+      expect(dragonResults[0].tmdbId).toBe(12971);
+      expect(dragonResults[1]).toMatchObject({
+        anilistId: 2229,
+        tmdbId: null,
+        titlePt: null,
+        synopsis: 'Abel RPG adventure synopsis.',
+      });
+    });
   });
 
   describe('getHomeFeed & DB identity preservation', () => {

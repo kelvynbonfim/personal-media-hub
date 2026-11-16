@@ -88,24 +88,6 @@ function normalizeTitleKey(value: string | null | undefined): string {
     .trim();
 }
 
-function hasSharedTitleToken(
-  media: MediaItemRecord,
-  match: TmdbAnimeLocalization
-): boolean {
-  const mediaTokens = new Set(
-    [media.titleRomaji, media.titleEnglish, media.titlePt]
-      .flatMap((t) => normalizeTitleKey(t).split(/\s+/))
-      .filter((token) => token.length >= 4)
-  );
-  if (mediaTokens.size === 0) {
-    return false;
-  }
-  const matchTokens = [match.titlePt, match.originalTitle]
-    .flatMap((t) => normalizeTitleKey(t).split(/\s+/))
-    .filter((token) => token.length >= 4);
-  return matchTokens.some((token) => mediaTokens.has(token));
-}
-
 function extractAnilistIdFromDeterministicId(mediaItemId: string): number | null {
   const match = /^(?:anilist:|anilist_|anime-)(\d+)$/.exec(mediaItemId.trim());
   if (match) {
@@ -439,14 +421,17 @@ export class CatalogService {
         candidateKeys.has(normalizeTitleKey(match.originalTitle)) ||
         candidateKeys.has(normalizeTitleKey(match.titlePt))
     );
-    if (exactMatches.length > 0) {
-      return (
-        exactMatches.find(
-          (match) =>
-            this.isLanguageCompatible(match.originalLanguage) &&
-            this.isYearCompatible(media.seasonYear, match.releaseYear)
-        ) ?? exactMatches[0]
-      );
+    const compatibleExact = exactMatches.find(
+      (match) =>
+        this.isLanguageCompatible(match.originalLanguage) &&
+        this.isYearCompatible(media.seasonYear, match.releaseYear)
+    );
+    if (compatibleExact) {
+      return compatibleExact;
+    }
+
+    if (!isTopResult) {
+      return null;
     }
 
     const compatible = matches.filter(
@@ -461,8 +446,7 @@ export class CatalogService {
         media.seasonYear !== null &&
         match.releaseYear !== null &&
         match.releaseYear !== undefined &&
-        Math.abs(media.seasonYear - match.releaseYear) <= 1 &&
-        (isTopResult || hasSharedTitleToken(media, match))
+        Math.abs(media.seasonYear - match.releaseYear) <= 1
     );
     if (japaneseYearConfirmed) {
       return japaneseYearConfirmed;
