@@ -16,9 +16,11 @@ import {
 
 type BridgePendingTask =
   | {
+      id: number;
       kind: 'AUTH';
       url: string;
       credentials: UniTvCredentials;
+      authSubmitted: boolean;
       resolve: (value: {
         ok: boolean;
         errorCode?: 'CONCURRENT_SCREEN_LIMIT' | 'AUTH_FAILED';
@@ -26,6 +28,7 @@ type BridgePendingTask =
       timerId: ReturnType<typeof setTimeout>;
     }
   | {
+      id: number;
       kind: 'SEARCH';
       url: string;
       queryCandidates: string[];
@@ -35,6 +38,7 @@ type BridgePendingTask =
       timerId: ReturnType<typeof setTimeout>;
     }
   | {
+      id: number;
       kind: 'EXTRACT';
       url: string;
       fallbackUrl: string;
@@ -89,7 +93,11 @@ function buildAuthInjectionScript(credentials: UniTvCredentials): string {
   } else if (passInput.form) {
     passInput.form.submit();
   }
-  setTimeout(function () {
+  if (window.__UNITV_AUTH_TIMER__) {
+    clearTimeout(window.__UNITV_AUTH_TIMER__);
+    window.__UNITV_AUTH_TIMER__ = null;
+  }
+  window.__UNITV_AUTH_TIMER__ = setTimeout(function () {
     var nextText = (document.body && document.body.innerText ? document.body.innerText : '').toLowerCase();
     if (/limite de telas|concurrent|muitas telas|outro dispositivo/.test(nextText)) {
       post({ type: 'BRIDGE_AUTH_RESULT', ok: false, errorCode: 'CONCURRENT_SCREEN_LIMIT' });
@@ -102,6 +110,34 @@ function buildAuthInjectionScript(credentials: UniTvCredentials): string {
     var stillHasPass = Boolean(document.querySelector('input[type="password"]'));
     post({ type: 'BRIDGE_AUTH_RESULT', ok: !stillHasPass, errorCode: stillHasPass ? 'AUTH_FAILED' : undefined });
   }, 1500);
+})();
+true;
+`.trim();
+}
+
+function buildAuthVerificationScript(): string {
+  return `
+(function () {
+  if (window.__UNITV_AUTH_TIMER__) {
+    clearTimeout(window.__UNITV_AUTH_TIMER__);
+    window.__UNITV_AUTH_TIMER__ = null;
+  }
+  var post = function (payload) {
+    if (window.ReactNativeWebView && typeof window.ReactNativeWebView.postMessage === 'function') {
+      window.ReactNativeWebView.postMessage(JSON.stringify(payload));
+    }
+  };
+  var bodyText = (document.body && document.body.innerText ? document.body.innerText : '').toLowerCase();
+  if (/limite de telas|concurrent|muitas telas|outro dispositivo/.test(bodyText)) {
+    post({ type: 'BRIDGE_AUTH_RESULT', ok: false, errorCode: 'CONCURRENT_SCREEN_LIMIT' });
+    return true;
+  }
+  if (/senha incorreta|invalid|inv[aá]lid|erro ao entrar|unauthorized/.test(bodyText)) {
+    post({ type: 'BRIDGE_AUTH_RESULT', ok: false, errorCode: 'AUTH_FAILED' });
+    return true;
+  }
+  var stillHasPass = Boolean(document.querySelector('input[type="password"]'));
+  post({ type: 'BRIDGE_AUTH_RESULT', ok: !stillHasPass, errorCode: stillHasPass ? 'AUTH_FAILED' : undefined });
 })();
 true;
 `.trim();
@@ -157,6 +193,7 @@ export class RuntimeWebViewBridgeController implements UniTvSessionBridge {
   private listener: HostListener | null = null;
   private activeTask: BridgePendingTask | null = null;
   private queue: Promise<void> = Promise.resolve();
+  private nextTaskId = 1;
 
   attachHost(listener: HostListener): () => void {
     this.listener = listener;
@@ -281,12 +318,29 @@ export class RuntimeWebViewBridgeController implements UniTvSessionBridge {
 
   getInjectionScriptForTask(task: BridgePendingTask): string {
     if (task.kind === 'AUTH') {
-      return buildAuthInjectionScript(task.credentials);
+      return task.authSubmitted
+        ? buildAuthVerificationScript()
+        : buildAuthInjectionScript(task.credentials);
     }
     if (task.kind === 'SEARCH') {
       return buildSearchInjectionScript(task.queryCandidates);
     }
     return CLEAN_WEBVIEW_INJECT_SCRIPT;
+  }
+
+  handleLoadEnd(
+    taskId: number,
+    inject: (script: string) => void
+  ): void {
+    const task = this.activeTask;
+    if (!task || task.id !== taskId) {
+      return;
+    }
+    const script = this.getInjectionScriptForTask(task);
+    if (task.kind === 'AUTH' && !task.authSubmitted) {
+      task.authSubmitted = true;
+    }
+    inject(script);
   }
 
   authenticate(
@@ -302,17 +356,24 @@ export class RuntimeWebViewBridgeController implements UniTvSessionBridge {
     return this.enqueueTask(
       () =>
         new Promise((resolve) => {
+          if (!this.listener) {
+            resolve({ ok: false, errorCode: 'AUTH_FAILED' });
+            return;
+          }
+          const taskId = this.nextTaskId++;
           const timerId = setTimeout(() => {
-            if (this.activeTask?.kind === 'AUTH') {
+            if (this.activeTask?.id === taskId) {
               this.setActiveTask(null);
               resolve({ ok: false, errorCode: 'AUTH_FAILED' });
             }
           }, DEFAULT_STEP_TIMEOUT_MS);
 
           this.setActiveTask({
+            id: taskId,
             kind: 'AUTH',
             url: buildPortalUrl(portalUrl, 'login'),
             credentials,
+            authSubmitted: false,
             resolve,
             timerId,
           });
@@ -330,8 +391,13 @@ export class RuntimeWebViewBridgeController implements UniTvSessionBridge {
     return this.enqueueTask(
       () =>
         new Promise((resolve) => {
+          if (!this.listener) {
+            resolve(null);
+            return;
+          }
+          const taskId = this.nextTaskId++;
           const timerId = setTimeout(() => {
-            if (this.activeTask?.kind === 'SEARCH') {
+            if (this.activeTask?.id === taskId) {
               this.setActiveTask(null);
               resolve(null);
             }
@@ -339,6 +405,7 @@ export class RuntimeWebViewBridgeController implements UniTvSessionBridge {
 
           const primaryQuery = encodeURIComponent(queryCandidates[0]);
           this.setActiveTask({
+            id: taskId,
             kind: 'SEARCH',
             url: buildPortalUrl(portalUrl, `search?q=${primaryQuery}`),
             queryCandidates,
@@ -376,14 +443,20 @@ export class RuntimeWebViewBridgeController implements UniTvSessionBridge {
     return this.enqueueTask(
       () =>
         new Promise((resolve) => {
+          if (!this.listener) {
+            resolve({ timedOut: true, webViewUrl: fallbackUrl });
+            return;
+          }
+          const taskId = this.nextTaskId++;
           const timerId = setTimeout(() => {
-            if (this.activeTask?.kind === 'EXTRACT') {
+            if (this.activeTask?.id === taskId) {
               this.setActiveTask(null);
               resolve({ timedOut: true, webViewUrl: fallbackUrl });
             }
           }, params.timeoutMs);
 
           this.setActiveTask({
+            id: taskId,
             kind: 'EXTRACT',
             url: fallbackUrl,
             fallbackUrl,
@@ -445,13 +518,17 @@ export function RuntimeWebViewBridgeHost({
         source={{ uri: task.url }}
         javaScriptEnabled={true}
         domStorageEnabled={true}
+        setSupportMultipleWindows={false}
+        onShouldStartLoadWithRequest={(request) =>
+          /^https?:\/\//i.test(request.url)
+        }
         injectedJavaScriptBeforeContentLoaded={
           task.kind === 'EXTRACT' ? CLEAN_WEBVIEW_INJECT_SCRIPT : undefined
         }
         onLoadEnd={() => {
-          webViewRef.current?.injectJavaScript(
-            controller.getInjectionScriptForTask(task)
-          );
+          controller.handleLoadEnd(task.id, (script) => {
+            webViewRef.current?.injectJavaScript(script);
+          });
         }}
         onMessage={(event: WebViewMessageEvent) => {
           controller.handleWebViewMessage(event.nativeEvent.data);

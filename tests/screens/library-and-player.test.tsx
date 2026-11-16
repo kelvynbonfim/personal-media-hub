@@ -2,6 +2,8 @@ import React from 'react';
 import { Linking } from 'react-native';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
 import * as ScreenOrientation from 'expo-screen-orientation';
+import { SelectedTrackType } from 'react-native-video';
+import { WebView } from 'react-native-webview';
 import { CatalogService, FranchiseNode } from '../../src/catalog/catalog-service';
 import { BackupService } from '../../src/db/backup-service';
 import { LibraryRepository } from '../../src/db/library-repository';
@@ -17,6 +19,10 @@ import {
 import { AppServices, AppServicesProvider } from '../../src/navigation/AppServicesContext';
 import { RootNavigator } from '../../src/navigation/RootNavigator';
 import { CredentialsStore, UniTvCredentials } from '../../src/playback/credentials-store';
+import {
+  RuntimeWebViewBridgeController,
+  RuntimeWebViewBridgeHost,
+} from '../../src/playback/runtime-webview-bridge';
 import { PlaybackSourceAdapter } from '../../src/playback/types';
 import {
   CLEAN_WEBVIEW_INJECT_SCRIPT,
@@ -1211,5 +1217,399 @@ describe('RootNavigator & App Task 8 integration', () => {
     await waitFor(() => {
       expect(capturedPlaybackAdapter).toBeInstanceOf(UniTvPlaybackAdapter);
     });
+  });
+});
+
+describe('Task 8 review fix regressions', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('protects hidden RuntimeWebViewBridgeHost WebView against non-http schemes/popups, fails queued tasks fast on unmount, and prevents duplicate AUTH submits on redirect onLoadEnd', async () => {
+    const controller = new RuntimeWebViewBridgeController();
+    const { UNSAFE_getByType, unmount } = render(
+      React.createElement(RuntimeWebViewBridgeHost, { controller })
+    );
+
+    const authPromise = controller.authenticate('https://www.uvwebs.info', {
+      username: 'user@example.com',
+      password: 'secret',
+    });
+
+    await waitFor(() => {
+      expect(UNSAFE_getByType(WebView)).toBeTruthy();
+    });
+
+    const hiddenWebView = UNSAFE_getByType(WebView);
+    expect(hiddenWebView.props.setSupportMultipleWindows).toBe(false);
+    expect(
+      hiddenWebView.props.onShouldStartLoadWithRequest({ url: 'unitv://watch/123' })
+    ).toBe(false);
+    expect(
+      hiddenWebView.props.onShouldStartLoadWithRequest({ url: 'intent://app#Intent' })
+    ).toBe(false);
+    expect(
+      hiddenWebView.props.onShouldStartLoadWithRequest({
+        url: 'https://www.uvwebs.info/login',
+      })
+    ).toBe(true);
+
+    // Queue a second task while AUTH is active, then verify repeated onLoadEnd only submits once
+    const queuedSearchPromise = controller.searchVod('https://www.uvwebs.info', [
+      'Frieren',
+    ]);
+
+    const scriptSpy = jest.spyOn(controller, 'getInjectionScriptForTask');
+
+    // First onLoadEnd submits form; second onLoadEnd (after POST redirect) must inspect only, not re-submit
+    act(() => {
+      hiddenWebView.props.onLoadEnd();
+    });
+    act(() => {
+      hiddenWebView.props.onLoadEnd();
+    });
+    expect(scriptSpy).toHaveBeenCalledTimes(2);
+    expect(scriptSpy.mock.results[0].value).toContain('submit');
+    expect(scriptSpy.mock.results[1].value).not.toContain('passInput.form.submit()');
+    expect(scriptSpy.mock.results[1].value).not.toContain('submitBtn.click()');
+
+    // Unmount host while AUTH is active and SEARCH is queued -> both settle immediately (no 10s hang)
+    unmount();
+    const [authRes, searchRes] = await Promise.all([authPromise, queuedSearchPromise]);
+    expect(authRes).toEqual({ ok: false, errorCode: 'AUTH_FAILED' });
+    expect(searchRes).toBeNull();
+  });
+
+  it('preserves resumed positionSeconds when VideoPlayerScreen closes between onLoad and first onProgress', async () => {
+    const media = makeMedia({
+      id: 'anilist:401',
+      anilistId: 401,
+      titlePt: 'Anime Retomado',
+      episodesTotal: 12,
+    });
+    const recordPlaybackProgress = jest.fn(
+      async (_input: {
+        mediaItemId: string;
+        episodeNumber: number;
+        positionSeconds: number;
+        durationSeconds: number;
+        watchedVia: 'APP_PLAYER' | 'MANUAL';
+      }) => ({
+        episodeCompleted: false,
+        seasonCompletedPrompt: false,
+      })
+    );
+
+    const services = createMockServices({
+      libraryRepository: {
+        getMediaItemById: jest.fn(async () => media),
+        getEpisodeProgressList: jest.fn(async () => [
+          makeProgress(media.id, 4, {
+            positionSeconds: 580,
+            durationSeconds: 1440,
+            isCompleted: false,
+          }),
+        ]),
+        recordPlaybackProgress,
+      },
+      playbackAdapter: {
+        resolveEpisodePlayback: jest.fn(async () => ({
+          mode: 'EXOPLAYER_HLS' as const,
+          streamUrl: 'https://cdn.unitv.example/401/ep4.m3u8',
+        })),
+      },
+    });
+
+    const goBack = jest.fn();
+    const { getByTestId, unmount } = render(
+      <AppServicesProvider value={services}>
+        <VideoPlayerScreen
+          navigation={{ navigate: jest.fn(), goBack }}
+          route={{ params: { mediaItemId: media.id, episodeNumber: 4 } }}
+        />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(getByTestId('video-player-exo')).toBeTruthy();
+    });
+
+    act(() => {
+      getByTestId('video-player-exo').props.onLoad({
+        currentTime: 0,
+        duration: 1440,
+        naturalSize: { width: 1920, height: 1080, orientation: 'landscape' },
+        audioTracks: [],
+        textTracks: [],
+        videoTracks: [],
+      });
+    });
+
+    await act(async () => {
+      fireEvent.press(getByTestId('player-close-button'));
+    });
+    unmount();
+
+    expect(goBack).toHaveBeenCalledTimes(1);
+    for (const call of recordPlaybackProgress.mock.calls) {
+      expect(call[0].positionSeconds).toBeGreaterThanOrEqual(580);
+    }
+  });
+
+  it('respects preferMaxQuality=false, preserves manual quality selection across onVideoTracks, and emits SelectedTrackType.DISABLED when cycling subtitles off', async () => {
+    const media = makeMedia({
+      id: 'anilist:402',
+      anilistId: 402,
+      titlePt: 'Anime Qualidade e Legenda',
+    });
+
+    // 1) preferMaxQuality = false should NOT auto-force 1080p
+    const autoOffServices = createMockServices({
+      libraryRepository: {
+        getMediaItemById: jest.fn(async () => media),
+        getSettings: jest.fn(async () => ({
+          ...DEFAULT_APP_SETTINGS,
+          preferMaxQuality: false,
+        })),
+      },
+      playbackAdapter: {
+        resolveEpisodePlayback: jest.fn(async () => ({
+          mode: 'EXOPLAYER_HLS' as const,
+          streamUrl: 'https://cdn.unitv.example/402/ep1.m3u8',
+        })),
+      },
+    });
+
+    const autoOffView = render(
+      <AppServicesProvider value={autoOffServices}>
+        <VideoPlayerScreen
+          navigation={{ navigate: jest.fn(), goBack: jest.fn() }}
+          route={{ params: { mediaItemId: media.id, episodeNumber: 1 } }}
+        />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(autoOffView.getByTestId('video-player-exo')).toBeTruthy();
+    });
+
+    act(() => {
+      autoOffView.getByTestId('video-player-exo').props.onLoad({
+        currentTime: 0,
+        duration: 1440,
+        naturalSize: { width: 1280, height: 720, orientation: 'landscape' },
+        audioTracks: [],
+        textTracks: [{ index: 0, title: 'Português', language: 'pt' }],
+        videoTracks: [
+          { index: 0, width: 1280, height: 720, bitrate: 3_000_000 },
+          { index: 1, width: 1920, height: 1080, bitrate: 8_000_000 },
+        ],
+      });
+    });
+
+    expect(autoOffView.getByTestId('video-player-exo').props.selectedVideoTrack).toBeUndefined();
+
+    // Cycling subtitle: Off -> Track 0 -> Disabled ({ type: SelectedTrackType.DISABLED })
+    fireEvent.press(autoOffView.getByTestId('player-subtitle-button'));
+    expect(autoOffView.getByTestId('video-player-exo').props.selectedTextTrack).toEqual({
+      type: SelectedTrackType.INDEX,
+      value: 0,
+    });
+    fireEvent.press(autoOffView.getByTestId('player-subtitle-button'));
+    expect(autoOffView.getByTestId('video-player-exo').props.selectedTextTrack).toEqual({
+      type: SelectedTrackType.DISABLED,
+    });
+    autoOffView.unmount();
+
+    // 2) preferMaxQuality = true selects 1080p once, but preserves manual cycle to 720p across subsequent onVideoTracks
+    const maxServices = createMockServices({
+      libraryRepository: {
+        getMediaItemById: jest.fn(async () => media),
+        getSettings: jest.fn(async () => ({
+          ...DEFAULT_APP_SETTINGS,
+          preferMaxQuality: true,
+        })),
+      },
+      playbackAdapter: {
+        resolveEpisodePlayback: jest.fn(async () => ({
+          mode: 'EXOPLAYER_HLS' as const,
+          streamUrl: 'https://cdn.unitv.example/402/ep1.m3u8',
+        })),
+      },
+    });
+
+    const maxView = render(
+      <AppServicesProvider value={maxServices}>
+        <VideoPlayerScreen
+          navigation={{ navigate: jest.fn(), goBack: jest.fn() }}
+          route={{ params: { mediaItemId: media.id, episodeNumber: 1 } }}
+        />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(maxView.getByTestId('video-player-exo')).toBeTruthy();
+    });
+
+    const tracks = [
+      { index: 0, width: 1280, height: 720, bitrate: 3_000_000 },
+      { index: 1, width: 1920, height: 1080, bitrate: 8_000_000 },
+    ];
+    act(() => {
+      maxView.getByTestId('video-player-exo').props.onLoad({
+        currentTime: 0,
+        duration: 1440,
+        naturalSize: { width: 1920, height: 1080, orientation: 'landscape' },
+        audioTracks: [],
+        textTracks: [],
+        videoTracks: tracks,
+      });
+    });
+
+    expect(maxView.getByTestId('video-player-exo').props.selectedVideoTrack).toEqual({
+      type: 'index',
+      value: 1,
+    });
+
+    // Manually cycle to 720p (index 0)
+    fireEvent.press(maxView.getByTestId('player-quality-badge'));
+    expect(maxView.getByTestId('video-player-exo').props.selectedVideoTrack).toEqual({
+      type: 'index',
+      value: 0,
+    });
+
+    // Subsequent onVideoTracks must NOT snap back to 1080p
+    act(() => {
+      maxView.getByTestId('video-player-exo').props.onVideoTracks({ videoTracks: tracks });
+    });
+    expect(maxView.getByTestId('video-player-exo').props.selectedVideoTrack).toEqual({
+      type: 'index',
+      value: 0,
+    });
+  });
+
+  it('clamps LibraryScreen List quick-play episode to episodesTotal for completed titles', async () => {
+    const completedMedia = makeMedia({
+      id: 'anilist:403',
+      anilistId: 403,
+      titlePt: 'Anime Concluído Clamp',
+      episodesTotal: 12,
+    });
+
+    const services = createMockServices({
+      libraryRepository: {
+        getLibraryByStatus: jest.fn(async (status) =>
+          status === 'COMPLETED'
+            ? [
+                {
+                  ...makeEntry(completedMedia.id, {
+                    status: 'COMPLETED',
+                    currentEpisode: 12,
+                  }),
+                  media: completedMedia,
+                },
+              ]
+            : []
+        ),
+      },
+    });
+
+    const navigate = jest.fn();
+    const { getByTestId } = render(
+      <AppServicesProvider value={services}>
+        <LibraryScreen navigation={{ navigate }} />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(getByTestId('library-status-chip-COMPLETED')).toBeTruthy();
+    });
+
+    fireEvent.press(getByTestId('library-status-chip-COMPLETED'));
+    fireEvent.press(getByTestId('library-layout-list'));
+    fireEvent.press(getByTestId(`library-row-play-${completedMedia.id}`));
+
+    expect(navigate).toHaveBeenCalledWith('VideoPlayer', {
+      mediaItemId: completedMedia.id,
+      episodeNumber: 12,
+    });
+  });
+
+  it('resets transient AnimeDetailsScreen UI state on route param change and initializes WATCHING entry on untracked episode toggle', async () => {
+    const season1 = makeMedia({
+      id: 'anilist:501',
+      anilistId: 501,
+      titlePt: 'Temporada 1',
+      episodesTotal: 12,
+    });
+    const season2 = makeMedia({
+      id: 'anilist:502',
+      anilistId: 502,
+      titlePt: 'Temporada 2',
+      episodesTotal: 12,
+    });
+
+    const services = createMockServices({
+      libraryRepository: {
+        getMediaItemById: jest.fn(async (id: string) =>
+          id === season2.id ? season2 : season1
+        ),
+        getMediaItemByAnilistId: jest.fn(async (id: number) =>
+          id === 502 ? season2 : season1
+        ),
+        getAllLibraryEntries: jest.fn(async () => []),
+        getEpisodeProgressList: jest.fn(async () => []),
+        toggleEpisodeManual: jest.fn(async () => ({
+          seasonCompletedPrompt: true,
+        })),
+      },
+    });
+
+    const view = render(
+      <AppServicesProvider value={services}>
+        <AnimeDetailsScreen
+          navigation={{ navigate: jest.fn() }}
+          route={{ params: { anilistId: 501, mediaItemId: season1.id } }}
+        />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(view.getAllByText('Temporada 1').length).toBeGreaterThan(0);
+    });
+
+    // Expand synopsis & trigger season-completed prompt via manual toggle on untracked anime
+    fireEvent.press(view.getByTestId('details-synopsis-toggle'));
+    expect(view.getByTestId('details-synopsis-text').props.numberOfLines).toBeUndefined();
+
+    fireEvent.press(view.getByTestId('episode-toggle-12'));
+    await waitFor(() => {
+      expect(view.getByTestId('season-completed-prompt')).toBeTruthy();
+      expect(
+        view.getByTestId('details-status-chip-WATCHING').props.style
+      ).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            borderColor: STATUS_META.WATCHING.color,
+          }),
+        ])
+      );
+    });
+
+    // Navigate to Season 2 on the same mounted screen instance -> transient state resets
+    view.rerender(
+      <AppServicesProvider value={services}>
+        <AnimeDetailsScreen
+          navigation={{ navigate: jest.fn() }}
+          route={{ params: { anilistId: 502, mediaItemId: season2.id } }}
+        />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(view.getAllByText('Temporada 2').length).toBeGreaterThan(0);
+    });
+    expect(view.queryByTestId('season-completed-prompt')).toBeNull();
+    expect(view.getByTestId('details-synopsis-text').props.numberOfLines).toBe(3);
   });
 });

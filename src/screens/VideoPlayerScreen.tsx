@@ -103,6 +103,7 @@ export function VideoPlayerScreen(
   const lastSavedPositionRef = React.useRef<number>(-1);
   const initialResumeSecondsRef = React.useRef<number>(0);
   const hasSeekedInitialRef = React.useRef<boolean>(false);
+  const hasAppliedAutoQualityRef = React.useRef<boolean>(false);
 
   const [loading, setLoading] = React.useState<boolean>(servicesReady);
   const [media, setMedia] = React.useState<MediaItemRecord | null>(null);
@@ -134,7 +135,7 @@ export function VideoPlayerScreen(
     Array<{ index: number; label: string }>
   >([]);
   const [selectedTextIndex, setSelectedTextIndex] = React.useState<
-    number | null
+    number | 'disabled' | null
   >(null);
 
   const [episodeCompleted, setEpisodeCompleted] = React.useState<boolean>(false);
@@ -202,6 +203,7 @@ export function VideoPlayerScreen(
     lastSavedPositionRef.current = -1;
     initialResumeSecondsRef.current = 0;
     hasSeekedInitialRef.current = false;
+    hasAppliedAutoQualityRef.current = false;
 
     setLoading(true);
     setScreenError(null);
@@ -262,6 +264,9 @@ export function VideoPlayerScreen(
         ) {
           initialResumeSecondsRef.current =
             existingEpisodeProgress.positionSeconds;
+          positionRef.current = existingEpisodeProgress.positionSeconds;
+          lastSavedPositionRef.current = existingEpisodeProgress.positionSeconds;
+          setCurrentTime(existingEpisodeProgress.positionSeconds);
         }
 
         setMedia(loadedMedia);
@@ -357,15 +362,16 @@ export function VideoPlayerScreen(
         bitrate: track.bitrate ?? 0,
       }));
       setVideoTracks(variants);
-      if (preferMaxQuality || selectedVideoTrackIndex === null) {
+      if (preferMaxQuality && !hasAppliedAutoQualityRef.current) {
         const best = selectBestHlsTrack(variants);
         if (best) {
+          hasAppliedAutoQualityRef.current = true;
           setSelectedVideoTrackIndex(best.index);
           setQualityLabel(best.label);
         }
       }
     },
-    [preferMaxQuality, selectedVideoTrackIndex]
+    [preferMaxQuality]
   );
 
   const handleVideoLoad = React.useCallback(
@@ -518,6 +524,7 @@ export function VideoPlayerScreen(
     if (videoTracks.length <= 1) {
       return;
     }
+    hasAppliedAutoQualityRef.current = true;
     const sorted = [...videoTracks].sort((a, b) => b.height - a.height || b.bitrate - a.bitrate);
     const currentIdx = sorted.findIndex(
       (track) => track.index === selectedVideoTrackIndex
@@ -713,9 +720,11 @@ export function VideoPlayerScreen(
       : undefined;
 
   const selectedTextTrack =
-    selectedTextIndex !== null
-      ? { type: SelectedTrackType.INDEX, value: selectedTextIndex }
-      : undefined;
+    selectedTextIndex === 'disabled'
+      ? { type: SelectedTrackType.DISABLED }
+      : selectedTextIndex !== null
+        ? { type: SelectedTrackType.INDEX, value: selectedTextIndex }
+        : undefined;
 
   return (
     <View style={styles.playerContainer}>
@@ -763,7 +772,13 @@ export function VideoPlayerScreen(
             style={styles.qualityPill}
           >
             <Text style={styles.qualityPillText}>
-              {qualityLabel ? `${qualityLabel} / Máxima` : 'Máxima'}
+              {qualityLabel
+                ? preferMaxQuality
+                  ? `${qualityLabel} / Máxima`
+                  : qualityLabel
+                : preferMaxQuality
+                  ? 'Máxima'
+                  : 'Auto'}
             </Text>
           </Pressable>
         </View>
@@ -846,6 +861,9 @@ export function VideoPlayerScreen(
               <Pressable
                 onPress={() =>
                   setSelectedTextIndex((prev) => {
+                    if (prev === null || prev === 'disabled') {
+                      return textTracks[0].index;
+                    }
                     const currentPos = textTracks.findIndex(
                       (track) => track.index === prev
                     );
@@ -853,7 +871,7 @@ export function VideoPlayerScreen(
                       return textTracks[0].index;
                     }
                     if (currentPos + 1 >= textTracks.length) {
-                      return null;
+                      return 'disabled';
                     }
                     return textTracks[currentPos + 1].index;
                   })
@@ -863,10 +881,12 @@ export function VideoPlayerScreen(
                 style={styles.overlayButton}
               >
                 <Text style={styles.overlayButtonText}>
-                  {selectedTextIndex !== null
+                  {typeof selectedTextIndex === 'number'
                     ? textTracks.find((t) => t.index === selectedTextIndex)
                         ?.label ?? 'Legenda'
-                    : 'Legenda'}
+                    : selectedTextIndex === 'disabled'
+                      ? 'Legenda: Off'
+                      : 'Legenda'}
                 </Text>
               </Pressable>
             ) : null}

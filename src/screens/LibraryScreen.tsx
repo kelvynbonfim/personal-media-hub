@@ -353,13 +353,16 @@ export function LibraryScreen(props: LibraryScreenProps = {}): React.JSX.Element
         </View>
 
         <Pressable
-          onPress={() =>
-            navigateToVideoPlayer(
-              navigation,
-              item.media.id,
-              Math.max(1, item.currentEpisode + 1)
-            )
-          }
+          onPress={() => {
+            const nextEpisode =
+              item.media.episodesTotal !== null && item.media.episodesTotal > 0
+                ? Math.min(
+                    item.media.episodesTotal,
+                    Math.max(1, item.currentEpisode + 1)
+                  )
+                : Math.max(1, item.currentEpisode + 1);
+            navigateToVideoPlayer(navigation, item.media.id, nextEpisode);
+          }}
           accessibilityRole="button"
           accessibilityLabel={`Reproduzir ${title}`}
           testID={`library-row-play-${item.media.id}`}

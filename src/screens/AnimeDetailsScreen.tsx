@@ -119,6 +119,34 @@ export function AnimeDetailsScreen(
 
   const isMountedRef = React.useRef<boolean>(true);
   const hasLoadedOnceRef = React.useRef<boolean>(false);
+  const entryRef = React.useRef<LibraryEntryRecord | null>(null);
+  const progressListRef = React.useRef<EpisodeProgressRecord[]>([]);
+
+  React.useEffect(() => {
+    entryRef.current = entry;
+  }, [entry]);
+
+  React.useEffect(() => {
+    progressListRef.current = progressList;
+  }, [progressList]);
+
+  React.useEffect(() => {
+    hasLoadedOnceRef.current = false;
+    entryRef.current = null;
+    progressListRef.current = [];
+    setLoading(servicesReady);
+    setMedia(null);
+    setEntry(null);
+    setAllEntries([]);
+    setProgressList([]);
+    setUniTvLink(null);
+    setNotesDraft('');
+    setSynopsisExpanded(false);
+    setNotesSavedBanner(false);
+    setSeasonCompletedPromptVisible(false);
+    setLinkModalVisible(false);
+    setErrorMessage(null);
+  }, [servicesReady, targetAnilistId, targetMediaItemId]);
 
   React.useEffect(() => {
     isMountedRef.current = true;
@@ -297,24 +325,24 @@ export function AnimeDetailsScreen(
         if (!isMountedRef.current) {
           return;
         }
-        setEntry((prev) => {
-          const merged: LibraryEntryRecord = prev
-            ? {
-                ...updated,
-                personalScore: prev.personalScore,
-                notes: prev.notes,
-                currentEpisode: Math.max(
-                  prev.currentEpisode,
-                  updated.currentEpisode
-                ),
-              }
-            : updated;
-          setAllEntries((entriesPrev) => [
-            merged,
-            ...entriesPrev.filter((item) => item.mediaItemId !== media.id),
-          ]);
-          return merged;
-        });
+        const prevEntry = entryRef.current;
+        const merged: LibraryEntryRecord = prevEntry
+          ? {
+              ...updated,
+              personalScore: prevEntry.personalScore,
+              notes: prevEntry.notes,
+              currentEpisode: Math.max(
+                prevEntry.currentEpisode,
+                updated.currentEpisode
+              ),
+            }
+          : updated;
+        entryRef.current = merged;
+        setEntry(merged);
+        setAllEntries((entriesPrev) => [
+          merged,
+          ...entriesPrev.filter((item) => item.mediaItemId !== media.id),
+        ]);
         if (status === 'COMPLETED') {
           setSeasonCompletedPromptVisible(false);
         }
@@ -453,53 +481,81 @@ export function AnimeDetailsScreen(
         if (!isMountedRef.current) {
           return;
         }
-        const rest = progressList.filter(
-          (row) => row.episodeNumber !== episodeNumber
-        );
-        const updatedRow: EpisodeProgressRecord = existing
-          ? {
-              ...existing,
-              isCompleted: nextCompleted,
-              watchedVia: 'MANUAL',
-              updatedAt: new Date().toISOString(),
-            }
-          : {
-              id: `ep-${media.id}-${episodeNumber}`,
-              mediaItemId: media.id,
-              episodeNumber,
-              positionSeconds: 0,
-              durationSeconds: 0,
-              isCompleted: nextCompleted,
-              watchedVia: 'MANUAL',
-              updatedAt: new Date().toISOString(),
-              dirty: 1,
-            };
-        const nextProgress = [...rest, updatedRow].sort(
-          (a, b) => a.episodeNumber - b.episodeNumber
-        );
-        setProgressList(nextProgress);
-        setEntry((prev) => {
-          if (!prev) {
-            return prev;
-          }
-          if (nextCompleted) {
-            return {
-              ...prev,
-              currentEpisode: Math.max(prev.currentEpisode, episodeNumber),
-            };
-          }
-          if (prev.currentEpisode === episodeNumber) {
-            const maxCompleted = nextProgress
-              .filter((row) => row.isCompleted)
-              .reduce((max, row) => Math.max(max, row.episodeNumber), 0);
-            return {
-              ...prev,
-              currentEpisode:
-                maxCompleted > 0 ? maxCompleted : Math.max(0, episodeNumber - 1),
-            };
-          }
-          return prev;
+        setProgressList((prevProgress) => {
+          const existingRow = prevProgress.find(
+            (row) => row.episodeNumber === episodeNumber
+          );
+          const rest = prevProgress.filter(
+            (row) => row.episodeNumber !== episodeNumber
+          );
+          const updatedRow: EpisodeProgressRecord = existingRow
+            ? {
+                ...existingRow,
+                isCompleted: nextCompleted,
+                watchedVia: 'MANUAL',
+                updatedAt: new Date().toISOString(),
+              }
+            : {
+                id: `ep-${media.id}-${episodeNumber}`,
+                mediaItemId: media.id,
+                episodeNumber,
+                positionSeconds: 0,
+                durationSeconds: 0,
+                isCompleted: nextCompleted,
+                watchedVia: 'MANUAL',
+                updatedAt: new Date().toISOString(),
+                dirty: 1,
+              };
+          const next = [...rest, updatedRow].sort(
+            (a, b) => a.episodeNumber - b.episodeNumber
+          );
+          progressListRef.current = next;
+          return next;
         });
+        const prevEntry = entryRef.current;
+        const nowIso = new Date().toISOString();
+        let nextEntry: LibraryEntryRecord | null = prevEntry;
+
+        if (!prevEntry) {
+          nextEntry = {
+            id: `entry-${media.id}`,
+            mediaItemId: media.id,
+            status: 'WATCHING',
+            personalScore: null,
+            currentEpisode: nextCompleted ? episodeNumber : 0,
+            notes: notesDraft,
+            rewatchCount: 0,
+            startedAt: nowIso,
+            completedAt: null,
+            updatedAt: nowIso,
+            dirty: 1,
+          };
+        } else if (nextCompleted) {
+          nextEntry = {
+            ...prevEntry,
+            currentEpisode: Math.max(prevEntry.currentEpisode, episodeNumber),
+          };
+        } else if (prevEntry.currentEpisode === episodeNumber) {
+          const maxCompleted = progressListRef.current
+            .filter(
+              (row) => row.isCompleted && row.episodeNumber !== episodeNumber
+            )
+            .reduce((max, row) => Math.max(max, row.episodeNumber), 0);
+          nextEntry = {
+            ...prevEntry,
+            currentEpisode:
+              maxCompleted > 0 ? maxCompleted : Math.max(0, episodeNumber - 1),
+          };
+        }
+
+        if (nextEntry && nextEntry !== prevEntry) {
+          entryRef.current = nextEntry;
+          setEntry(nextEntry);
+          setAllEntries((entriesPrev) => [
+            nextEntry!,
+            ...entriesPrev.filter((item) => item.mediaItemId !== media.id),
+          ]);
+        }
         if (result.seasonCompletedPrompt) {
           setSeasonCompletedPromptVisible(true);
         }
@@ -516,8 +572,8 @@ export function AnimeDetailsScreen(
     [
       libraryRepository,
       media,
+      notesDraft,
       progressByEpisode,
-      progressList,
       withMediaUpsertRetry,
     ]
   );
