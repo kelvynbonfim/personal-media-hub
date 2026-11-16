@@ -1,5 +1,7 @@
 import React from 'react';
+import { Share } from 'react-native';
 import { act, fireEvent, render, waitFor } from '@testing-library/react-native';
+import Video from 'react-native-video';
 import { WebView } from 'react-native-webview';
 import appConfigFactory from '../../app.config';
 import {
@@ -371,5 +373,157 @@ describe('UniTV WebView Android bounded diagnostic', () => {
     fireEvent.press(standalone.getByTestId('diagnostic-back-button'));
     expect(goBackNav).not.toHaveBeenCalled();
     expect(standaloneNav).toHaveBeenCalledWith('MainTabs');
+  });
+
+  it('activates post-login bridge on demand, captures sanitized DOM/stream, tests ExoPlayer, and shares report', async () => {
+    const shareSpy = jest.spyOn(Share, 'share');
+    const { getByTestId, queryByTestId, UNSAFE_getByType } = render(
+      <UniTvDiagnosticScreen navigation={{ navigate: jest.fn() }} />
+    );
+
+    const initialWebView = UNSAFE_getByType(WebView);
+    expect(initialWebView.props.onMessage).toBeUndefined();
+    expect(initialWebView.props.injectedJavaScript).toBeUndefined();
+    expect(
+      initialWebView.props.injectedJavaScriptBeforeContentLoaded
+    ).toBeUndefined();
+
+    fireEvent.press(getByTestId('diagnostic-toggle-panel-button'));
+
+    // ExoPlayer test button disabled/hidden until an HTTP stream candidate exists
+    expect(queryByTestId('diagnostic-exoplayer-video')).toBeNull();
+
+    // First post-login DOM capture enables onMessage and queues capture after reload onLoadEnd
+    fireEvent.press(getByTestId('diagnostic-capture-dom-button'));
+
+    const boundWebView = UNSAFE_getByType(WebView);
+    expect(typeof boundWebView.props.onMessage).toBe('function');
+
+    act(() => {
+      boundWebView.props.onLoadEnd?.();
+      boundWebView.props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'DIAG_PHASE2_DOM',
+            payload: {
+              url: 'https://www.unitvwebs.com/search/vod?q=Naruto&sid=secret_sid',
+              title: 'Busca VOD',
+              inputs: [
+                {
+                  tag: 'INPUT',
+                  type: 'search',
+                  name: 'keyword',
+                  id: 'search-input',
+                  placeholder: 'Pesquisar',
+                },
+              ],
+              actions: [
+                {
+                  tag: 'A',
+                  id: 'vod-naruto',
+                  className: 'vod-item',
+                  href: '/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC?token=abc',
+                  text: 'Naruto',
+                },
+              ],
+              video: {
+                found: true,
+                id: 'v-player_html5_api',
+                src: 'blob:https://www.unitvwebs.com/1111-2222',
+                readyState: 4,
+                videoWidth: 1920,
+                videoHeight: 1080,
+                duration: 1420,
+                paused: false,
+                textTrackCount: 1,
+              },
+            },
+          }),
+        },
+      });
+    });
+
+    // Arm stream capture and receive candidate with auth token in query
+    fireEvent.press(getByTestId('diagnostic-arm-stream-button'));
+    act(() => {
+      boundWebView.props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'DIAG_PHASE2_STREAM',
+            url: 'https://cdn.unitv.example/ep1/master.m3u8?token=secret999',
+            referer: 'https://www.unitvwebs.com/vod/details/0/DD04?sid=topsecret',
+            userAgent: 'AndroidWebViewTest',
+            sourceTag: 'fetch',
+            mimeHint: 'application/vnd.apple.mpegurl',
+          }),
+        },
+      });
+    });
+
+    const preview = getByTestId('diagnostic-report-preview').props.children as string;
+    expect(preview).toContain('https://www.unitvwebs.com/search/vod');
+    expect(preview).toContain('search-input');
+    expect(preview).toContain('https://cdn.unitv.example/ep1/master.m3u8');
+    expect(preview).not.toContain('secret999');
+    expect(preview).not.toContain('secret_sid');
+    expect(preview).not.toContain('topsecret');
+
+    // Mount ExoPlayer test player with captured candidate
+    fireEvent.press(getByTestId('diagnostic-test-exoplayer-button'));
+    const exoVideo = UNSAFE_getByType(Video);
+    expect(exoVideo.props.source).toEqual({
+      uri: 'https://cdn.unitv.example/ep1/master.m3u8?token=secret999',
+      headers: {
+        Referer: 'https://www.unitvwebs.com/vod/details/0/DD04',
+        'User-Agent': 'AndroidWebViewTest',
+      },
+    });
+
+    act(() => {
+      exoVideo.props.onLoad({
+        duration: 1420,
+        currentTime: 0,
+        naturalSize: { width: 1920, height: 1080, orientation: 'landscape' },
+        videoTracks: [{ index: 0, width: 1920, height: 1080, bitrate: 5_000_000 }],
+        audioTracks: [],
+        textTracks: [],
+      });
+      exoVideo.props.onProgress({
+        currentTime: 12,
+        playableDuration: 60,
+        seekableDuration: 1420,
+      });
+    });
+
+    expect(getByTestId('diagnostic-exoplayer-status').props.children).toContain(
+      'PLAYING'
+    );
+    expect(getByTestId('diagnostic-exoplayer-status').props.children).toContain(
+      '1080p'
+    );
+
+    fireEvent.press(getByTestId('diagnostic-exoplayer-ok'));
+
+    // Trigger Share and confirm no query secret leaks into shared payload
+    fireEvent.press(getByTestId('diagnostic-share-report-button'));
+    await waitFor(() => {
+      expect(shareSpy).toHaveBeenCalledTimes(1);
+    });
+    const sharedMessage = shareSpy.mock.calls[0][0].message as string;
+    expect(sharedMessage).toContain('ExoPlayer: PLAYING');
+    expect(sharedMessage).not.toContain('secret999');
+
+    // Simulate ExoPlayer error resets safely with sanitized detail
+    act(() => {
+      exoVideo.props.onError({
+        error: {
+          errorString: 'HTTP 403 Forbidden',
+          errorCode: '22004',
+        },
+      });
+    });
+    expect(getByTestId('diagnostic-exoplayer-status').props.children).toContain(
+      'ERROR'
+    );
   });
 });

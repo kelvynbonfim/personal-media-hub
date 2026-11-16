@@ -286,6 +286,9 @@ jest.mock('react-native', () => {
     Alert: {
       alert: jest.fn(),
     },
+    Share: {
+      share: jest.fn(async () => ({ action: 'sharedAction' })),
+    },
     Linking: {
       openURL: jest.fn(async () => true),
       canOpenURL: jest.fn(async () => true),
@@ -401,13 +404,17 @@ jest.mock('react-native-video', () => {
 
 jest.mock('react-native-webview', () => {
   const WebView = React.forwardRef<unknown, AnyProps>((props, ref) => {
-    React.useImperativeHandle(ref, () => ({
-      injectJavaScript: jest.fn(),
-      reload: jest.fn(),
-      goBack: jest.fn(),
-      goForward: jest.fn(),
-      stopLoading: jest.fn(),
-    }));
+    React.useImperativeHandle(
+      ref,
+      () => ({
+        injectJavaScript: jest.fn(),
+        reload: jest.fn(),
+        goBack: jest.fn(),
+        goForward: jest.fn(),
+        stopLoading: jest.fn(),
+      }),
+      []
+    );
     return React.createElement('WebView', props, props.children);
   });
   WebView.displayName = 'WebView';

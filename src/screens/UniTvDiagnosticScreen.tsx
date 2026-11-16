@@ -3,12 +3,23 @@ import {
   ActivityIndicator,
   Pressable,
   ScrollView,
+  Share,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { WebView, WebViewNavigation, WebViewProps } from 'react-native-webview';
+import Video, {
+  OnLoadData,
+  OnProgressData,
+  ResizeMode,
+} from 'react-native-video';
+import {
+  WebView,
+  WebViewMessageEvent,
+  WebViewNavigation,
+  WebViewProps,
+} from 'react-native-webview';
 
 type ShouldStartLoadParam = Parameters<
   NonNullable<WebViewProps['onShouldStartLoadWithRequest']>
@@ -21,6 +32,9 @@ type WebViewErrorParam = Parameters<
 >[0];
 type WebViewRenderGoneParam = Parameters<
   NonNullable<WebViewProps['onRenderProcessGone']>
+>[0];
+type VideoErrorParam = Parameters<
+  NonNullable<React.ComponentProps<typeof Video>['onError']>
 >[0];
 import {
   AdObservationValue,
@@ -35,6 +49,17 @@ import {
   UniTvDiagnosticChecks,
   UniTvDiagnosticEvent,
 } from '../diagnostics/unitv-diagnostic';
+import {
+  createInitialExoPlayerState,
+  ExoPlayerTestState,
+  formatPhase2ReportSection,
+  parsePhase2WebViewMessage,
+  PHASE2_DOM_INSPECT_SCRIPT,
+  PHASE2_STREAM_CAPTURE_SCRIPT,
+  Phase2DomSnapshot,
+  Phase2StreamCandidate,
+  Phase2StreamLogEntry,
+} from '../diagnostics/unitv-phase2-probe';
 import { BaseDiscoveryScreenProps } from './discovery-helpers';
 import { STATUS_META, THEME_TOKENS } from '../theme/tokens';
 
@@ -81,6 +106,40 @@ function formatTimerClock(seconds: number): string {
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
 }
 
+function formatResolutionFromLoad(event: OnLoadData): string | null {
+  const tracks = Array.isArray(event.videoTracks) ? event.videoTracks : [];
+  const maxHeight = tracks.reduce(
+    (best, t) => (typeof t.height === 'number' && t.height > best ? t.height : best),
+    0
+  );
+  if (maxHeight > 0) {
+    return `${maxHeight}p`;
+  }
+  const natHeight = event.naturalSize?.height ?? 0;
+  const natWidth = event.naturalSize?.width ?? 0;
+  if (natHeight > 0) {
+    return natWidth > 0 ? `${natWidth}x${natHeight}` : `${natHeight}p`;
+  }
+  return null;
+}
+
+function formatSanitizedExoError(rawEvent: VideoErrorParam): string {
+  const errObj =
+    rawEvent && typeof rawEvent === 'object' && 'error' in rawEvent
+      ? (rawEvent.error as Record<string, unknown> | undefined)
+      : undefined;
+  const code = errObj?.errorCode ?? errObj?.code ?? 'UNKNOWN';
+  const rawMessage =
+    typeof errObj?.errorString === 'string'
+      ? errObj.errorString
+      : typeof errObj?.localizedDescription === 'string'
+        ? errObj.localizedDescription
+        : 'Falha ao carregar mídia no ExoPlayer';
+  // Strip any embedded URL query strings from native error messages
+  const sanitizedMessage = rawMessage.replace(/\?[^\s"']+/g, '?[redacted]');
+  return `${String(code)}: ${sanitizedMessage}`;
+}
+
 export function UniTvDiagnosticScreen(
   props: UniTvDiagnosticScreenProps = {}
 ): React.JSX.Element {
@@ -88,6 +147,8 @@ export function UniTvDiagnosticScreen(
   const insets = useSafeAreaInsets();
   const webViewRef = React.useRef<WebView>(null);
   const eventSeqRef = React.useRef<number>(1);
+  const bridgeLoadedRef = React.useRef<boolean>(false);
+  const pendingBridgeActionsRef = React.useRef<Array<'DOM' | 'ARM_STREAM'>>([]);
 
   const [panelOpen, setPanelOpen] = React.useState<boolean>(false);
   const [webLoading, setWebLoading] = React.useState<boolean>(true);
@@ -101,6 +162,30 @@ export function UniTvDiagnosticScreen(
   const [events, setEvents] = React.useState<UniTvDiagnosticEvent[]>([]);
   const [timerRunning, setTimerRunning] = React.useState<boolean>(false);
   const [elapsedSeconds, setElapsedSeconds] = React.useState<number>(0);
+
+  const [postLoginToolsEnabled, setPostLoginToolsEnabled] =
+    React.useState<boolean>(false);
+  const [streamCaptureArmed, setStreamCaptureArmed] =
+    React.useState<boolean>(false);
+  const [domSnapshots, setDomSnapshots] = React.useState<Phase2DomSnapshot[]>(
+    []
+  );
+  const [streamLogs, setStreamLogs] = React.useState<Phase2StreamLogEntry[]>(
+    []
+  );
+  const [streamCandidate, setStreamCandidate] =
+    React.useState<Phase2StreamCandidate | null>(null);
+  const [exoTestActive, setExoTestActive] = React.useState<boolean>(false);
+  const [exoState, setExoState] = React.useState<ExoPlayerTestState>(() =>
+    createInitialExoPlayerState()
+  );
+  const [phase2Hint, setPhase2Hint] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    if (postLoginToolsEnabled && !bridgeLoadedRef.current) {
+      webViewRef.current?.reload();
+    }
+  }, [postLoginToolsEnabled]);
 
   React.useEffect(() => {
     if (!timerRunning) {
@@ -232,6 +317,132 @@ export function UniTvDiagnosticScreen(
     }));
   }, []);
 
+  const runBridgeAction = React.useCallback((action: 'DOM' | 'ARM_STREAM') => {
+    const script =
+      action === 'DOM'
+        ? PHASE2_DOM_INSPECT_SCRIPT
+        : PHASE2_STREAM_CAPTURE_SCRIPT;
+    webViewRef.current?.injectJavaScript(script);
+  }, []);
+
+  const triggerPostLoginAction = React.useCallback(
+    (action: 'DOM' | 'ARM_STREAM') => {
+      if (action === 'ARM_STREAM') {
+        setStreamCaptureArmed(true);
+      }
+      if (!postLoginToolsEnabled || !bridgeLoadedRef.current) {
+        if (!pendingBridgeActionsRef.current.includes(action)) {
+          pendingBridgeActionsRef.current.push(action);
+        }
+        setPhase2Hint(
+          'Ativando ponte pós-login e recarregando a página atual uma vez...'
+        );
+        setPostLoginToolsEnabled(true);
+        return;
+      }
+      runBridgeAction(action);
+      setPhase2Hint(
+        action === 'DOM'
+          ? 'Inspeção de DOM solicitada na página atual.'
+          : 'Captura de requisições de mídia armada.'
+      );
+    },
+    [postLoginToolsEnabled, runBridgeAction]
+  );
+
+  const handleWebViewLoadEnd = React.useCallback(() => {
+    setWebLoading(false);
+    if (!postLoginToolsEnabled) {
+      return;
+    }
+    bridgeLoadedRef.current = true;
+    const queued = [...pendingBridgeActionsRef.current];
+    pendingBridgeActionsRef.current = [];
+
+    for (const action of queued) {
+      runBridgeAction(action);
+    }
+    if (streamCaptureArmed && !queued.includes('ARM_STREAM')) {
+      runBridgeAction('ARM_STREAM');
+    }
+    if (queued.length > 0) {
+      setPhase2Hint('Ponte pós-login pronta e captura executada.');
+    }
+  }, [postLoginToolsEnabled, runBridgeAction, streamCaptureArmed]);
+
+  const handleWebViewMessage = React.useCallback(
+    (event: WebViewMessageEvent) => {
+      const parsed = parsePhase2WebViewMessage(event.nativeEvent.data);
+      if (!parsed) {
+        return;
+      }
+      if (parsed.kind === 'DOM') {
+        setDomSnapshots((prev) => [...prev.slice(-5), parsed.snapshot]);
+        setPhase2Hint(`DOM capturado: ${parsed.snapshot.url}`);
+        return;
+      }
+      setStreamLogs((prev) => [...prev.slice(-19), parsed.entry]);
+      if (parsed.kind === 'STREAM_CANDIDATE') {
+        setStreamCandidate(parsed.candidate);
+        setPhase2Hint(
+          `Candidato HTTP capturado (${parsed.candidate.sourceTag}): pronto para testar no ExoPlayer.`
+        );
+      } else {
+        setPhase2Hint(
+          'Player reportou blob:/MediaSource (MSE); observe se há manifest .m3u8/.mp4 adicional.'
+        );
+      }
+    },
+    []
+  );
+
+  const handleStartExoTest = React.useCallback(() => {
+    if (!streamCandidate) {
+      return;
+    }
+    setExoTestActive(true);
+    setExoState({
+      ...createInitialExoPlayerState(),
+      status: 'LOADING',
+    });
+  }, [streamCandidate]);
+
+  const handleExoLoad = React.useCallback((event: OnLoadData) => {
+    const resLabel = formatResolutionFromLoad(event);
+    const dur =
+      typeof event.duration === 'number' && Number.isFinite(event.duration)
+        ? event.duration
+        : 0;
+    setExoState((prev) => ({
+      ...prev,
+      status: 'PLAYING',
+      durationSeconds: dur,
+      resolutionLabel: resLabel ?? prev.resolutionLabel,
+      errorDetail: null,
+    }));
+  }, []);
+
+  const handleExoProgress = React.useCallback((event: OnProgressData) => {
+    const pos =
+      typeof event.currentTime === 'number' &&
+      Number.isFinite(event.currentTime)
+        ? event.currentTime
+        : 0;
+    setExoState((prev) => ({
+      ...prev,
+      status: 'PLAYING',
+      currentSeconds: pos,
+    }));
+  }, []);
+
+  const handleExoError = React.useCallback((rawEvent: VideoErrorParam) => {
+    setExoState((prev) => ({
+      ...prev,
+      status: 'ERROR',
+      errorDetail: formatSanitizedExoError(rawEvent),
+    }));
+  }, []);
+
   const handleBackNavigation = React.useCallback(() => {
     const canGoBack = navigation?.canGoBack
       ? navigation.canGoBack()
@@ -251,16 +462,36 @@ export function UniTvDiagnosticScreen(
       evt.kind === 'RENDER_CRASH' ||
       evt.kind === 'BLOCKED_SCHEME'
   ).length;
-  const sanitizedReport = React.useMemo(
-    () =>
-      formatSanitizedDiagnosticReport({
-        checks,
-        elapsedSeconds,
-        currentSanitizedUrl,
-        events,
-      }),
-    [checks, currentSanitizedUrl, elapsedSeconds, events]
-  );
+  const sanitizedReport = React.useMemo(() => {
+    const baseReport = formatSanitizedDiagnosticReport({
+      checks,
+      elapsedSeconds,
+      currentSanitizedUrl,
+      events,
+    });
+    const phase2Report = formatPhase2ReportSection({
+      domSnapshots,
+      streamLogs,
+      exoState,
+    });
+    return `${baseReport}\n${phase2Report}`;
+  }, [
+    checks,
+    currentSanitizedUrl,
+    domSnapshots,
+    elapsedSeconds,
+    events,
+    exoState,
+    streamLogs,
+  ]);
+
+  const handleShareReport = React.useCallback(async () => {
+    try {
+      await Share.share({ message: sanitizedReport });
+    } catch {
+      // Ignore share cancellation errors on device.
+    }
+  }, [sanitizedReport]);
 
   return (
     <View
@@ -487,11 +718,193 @@ export function UniTvDiagnosticScreen(
             </View>
           </View>
 
+          <View style={styles.phase2Card}>
+            <Text style={styles.sectionLabel}>
+              Fase 2 — Busca, Episódios & Teste ExoPlayer (somente pós-login)
+            </Text>
+            <Text style={styles.mutedText}>
+              {phase2Hint ??
+                'Resolva /captcha e login primeiro. Só depois use estes botões para inspecionar DOM ou testar o stream no player nativo.'}
+            </Text>
+
+            <View style={styles.checkActions}>
+              <Pressable
+                onPress={() => triggerPostLoginAction('DOM')}
+                accessibilityRole="button"
+                testID="diagnostic-capture-dom-button"
+                style={styles.actionPill}
+              >
+                <Text style={styles.actionPillText}>
+                  {`Capturar DOM Atual (${domSnapshots.length})`}
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => triggerPostLoginAction('ARM_STREAM')}
+                accessibilityRole="button"
+                testID="diagnostic-arm-stream-button"
+                style={[
+                  styles.neutralPill,
+                  streamCaptureArmed && styles.stateButtonOk,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.neutralPillText,
+                    streamCaptureArmed && styles.stateButtonTextOk,
+                  ]}
+                >
+                  {streamCaptureArmed
+                    ? `Captura Armada (${streamLogs.length})`
+                    : 'Armar Captura de Stream'}
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={handleStartExoTest}
+                disabled={!streamCandidate}
+                accessibilityRole="button"
+                testID="diagnostic-test-exoplayer-button"
+                style={[
+                  styles.actionPill,
+                  !streamCandidate && styles.disabledControl,
+                ]}
+              >
+                <Text style={styles.actionPillText}>
+                  {exoTestActive ? 'Reiniciar ExoPlayer' : 'Testar no ExoPlayer'}
+                </Text>
+              </Pressable>
+
+              <Pressable
+                onPress={() => void handleShareReport()}
+                accessibilityRole="button"
+                testID="diagnostic-share-report-button"
+                style={styles.neutralPill}
+              >
+                <Text style={styles.neutralPillText}>Compartilhar Resumo</Text>
+              </Pressable>
+            </View>
+
+            {exoTestActive && streamCandidate ? (
+              <View style={styles.exoTestBox}>
+                <Text
+                  testID="diagnostic-exoplayer-status"
+                  style={styles.timerValue}
+                >
+                  {`ExoPlayer: ${exoState.status}${
+                    exoState.resolutionLabel
+                      ? ` · ${exoState.resolutionLabel}`
+                      : ''
+                  }${
+                    exoState.durationSeconds > 0
+                      ? ` · ${Math.round(exoState.currentSeconds)}s/${Math.round(exoState.durationSeconds)}s`
+                      : ''
+                  }`}
+                </Text>
+                {exoState.errorDetail ? (
+                  <Text style={styles.stateButtonTextFail}>
+                    {exoState.errorDetail}
+                  </Text>
+                ) : null}
+
+                <View style={styles.exoVideoFrame}>
+                  <Video
+                    testID="diagnostic-exoplayer-video"
+                    source={{
+                      uri: streamCandidate.streamUrl,
+                      headers: {
+                        ...(streamCandidate.referer
+                          ? { Referer: streamCandidate.referer }
+                          : {}),
+                        ...(streamCandidate.userAgent
+                          ? { 'User-Agent': streamCandidate.userAgent }
+                          : {}),
+                      },
+                    }}
+                    style={styles.exoVideoSurface}
+                    resizeMode={ResizeMode.CONTAIN}
+                    controls={true}
+                    paused={false}
+                    progressUpdateInterval={1000}
+                    onLoad={handleExoLoad}
+                    onProgress={handleExoProgress}
+                    onError={handleExoError}
+                  />
+                </View>
+
+                <View style={styles.checkActions}>
+                  <Pressable
+                    onPress={() =>
+                      setExoState((prev) => ({
+                        ...prev,
+                        manualConfirm: prev.manualConfirm === true ? null : true,
+                      }))
+                    }
+                    accessibilityRole="button"
+                    testID="diagnostic-exoplayer-ok"
+                    style={[
+                      styles.stateButton,
+                      exoState.manualConfirm === true && styles.stateButtonOk,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.stateButtonText,
+                        exoState.manualConfirm === true &&
+                          styles.stateButtonTextOk,
+                      ]}
+                    >
+                      ExoPlayer OK
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() =>
+                      setExoState((prev) => ({
+                        ...prev,
+                        manualConfirm:
+                          prev.manualConfirm === false ? null : false,
+                      }))
+                    }
+                    accessibilityRole="button"
+                    testID="diagnostic-exoplayer-fail"
+                    style={[
+                      styles.stateButton,
+                      exoState.manualConfirm === false &&
+                        styles.stateButtonFail,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.stateButtonText,
+                        exoState.manualConfirm === false &&
+                          styles.stateButtonTextFail,
+                      ]}
+                    >
+                      ExoPlayer Falhou
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => setExoTestActive(false)}
+                    accessibilityRole="button"
+                    testID="diagnostic-exoplayer-close"
+                    style={styles.neutralPill}
+                  >
+                    <Text style={styles.neutralPillText}>Fechar Teste</Text>
+                  </Pressable>
+                </View>
+              </View>
+            ) : null}
+          </View>
+
           <View style={styles.logCard}>
             <Text style={styles.sectionLabel}>
               Resumo & Eventos Sanitizados (sem credenciais/cookies)
             </Text>
-            <Text testID="diagnostic-report-preview" style={styles.reportText}>
+            <Text
+              selectable={true}
+              testID="diagnostic-report-preview"
+              style={styles.reportText}
+            >
               {sanitizedReport}
             </Text>
           </View>
@@ -513,8 +926,10 @@ export function UniTvDiagnosticScreen(
           setSupportMultipleWindows={false}
           javaScriptCanOpenWindowsAutomatically={false}
           webviewDebuggingEnabled={typeof __DEV__ !== 'undefined' && Boolean(__DEV__)}
+          onMessage={postLoginToolsEnabled ? handleWebViewMessage : undefined}
           onShouldStartLoadWithRequest={handleShouldStartLoad}
           onNavigationStateChange={handleNavigationStateChange}
+          onLoadEnd={handleWebViewLoadEnd}
           onHttpError={handleHttpError}
           onError={handleLoadError}
           onRenderProcessGone={handleRenderProcessGone}
@@ -765,6 +1180,31 @@ const styles = StyleSheet.create({
     borderRadius: THEME_TOKENS.radius.md,
     padding: THEME_TOKENS.spacing.md,
     gap: THEME_TOKENS.spacing.xs,
+  },
+  phase2Card: {
+    backgroundColor: THEME_TOKENS.bg.card,
+    borderColor: THEME_TOKENS.border.subtle,
+    borderWidth: 1,
+    borderRadius: THEME_TOKENS.radius.md,
+    padding: THEME_TOKENS.spacing.md,
+    gap: THEME_TOKENS.spacing.sm,
+  },
+  exoTestBox: {
+    marginTop: THEME_TOKENS.spacing.xs,
+    gap: THEME_TOKENS.spacing.sm,
+    paddingTop: THEME_TOKENS.spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: THEME_TOKENS.border.subtle,
+  },
+  exoVideoFrame: {
+    width: '100%',
+    height: 200,
+    backgroundColor: '#000000',
+    borderRadius: THEME_TOKENS.radius.sm,
+    overflow: 'hidden',
+  },
+  exoVideoSurface: {
+    flex: 1,
   },
   reportText: {
     ...THEME_TOKENS.typography.caption,
