@@ -1613,3 +1613,253 @@ describe('Task 8 review fix regressions', () => {
     expect(view.getByTestId('details-synopsis-text').props.numberOfLines).toBe(3);
   });
 });
+
+describe('Final Fix Wave regressions', () => {
+  it('prevents EXOPLAYER_HLS <-> CLEAN_WEBVIEW flip-flop loop for failed stream URLs and resets failed set when episode changes', async () => {
+    const media = makeMedia({
+      id: 'anilist:601',
+      anilistId: 601,
+      titlePt: 'Anime Loop Guard',
+      episodesTotal: 12,
+    });
+
+    const resolveEpisodePlayback = jest.fn(async ({ episodeNumber }: { episodeNumber: number }) =>
+      episodeNumber === 1
+        ? {
+            mode: 'EXOPLAYER_HLS' as const,
+            streamUrl: 'https://cdn.unitv.example/bad.m3u8',
+            headers: { Referer: 'https://www.uvwebs.info/' },
+            vodId: 'vod-601',
+          }
+        : {
+            mode: 'CLEAN_WEBVIEW' as const,
+            webViewUrl: 'https://www.uvwebs.info/vod/vod-601?ep=2',
+            vodId: 'vod-601',
+          }
+    );
+
+    const services = createMockServices({
+      libraryRepository: {
+        getMediaItemById: jest.fn(async () => media),
+      },
+      playbackAdapter: {
+        resolveEpisodePlayback,
+      },
+    });
+
+    const view = render(
+      <AppServicesProvider value={services}>
+        <VideoPlayerScreen
+          navigation={{ navigate: jest.fn(), goBack: jest.fn() }}
+          route={{ params: { mediaItemId: media.id, episodeNumber: 1 } }}
+        />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(view.getByTestId('video-player-exo')).toBeTruthy();
+    });
+
+    // 1) Initial HLS URL fails -> falls back to CLEAN_WEBVIEW
+    act(() => {
+      view.getByTestId('video-player-exo').props.onError();
+    });
+
+    await waitFor(() => {
+      expect(view.getByTestId('video-player-webview')).toBeTruthy();
+    });
+
+    // 2) WebView re-captures the same failed stream URL -> must stay stably in CLEAN_WEBVIEW
+    act(() => {
+      view.getByTestId('video-player-webview').props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'STREAM_CAPTURED',
+            url: 'https://cdn.unitv.example/bad.m3u8',
+            headers: { Referer: 'https://www.uvwebs.info/' },
+          }),
+        },
+      });
+    });
+
+    expect(view.getByTestId('video-player-webview')).toBeTruthy();
+    expect(view.queryByTestId('video-player-exo')).toBeNull();
+
+    // 3) A different unfailed stream URL captured by WebView can still promote to EXOPLAYER_HLS
+    act(() => {
+      view.getByTestId('video-player-webview').props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'STREAM_CAPTURED',
+            url: 'https://cdn.unitv.example/good.m3u8',
+            headers: { Referer: 'https://www.uvwebs.info/' },
+          }),
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(view.getByTestId('video-player-exo')).toBeTruthy();
+    });
+    expect(view.getByTestId('video-player-exo').props.source.uri).toBe(
+      'https://cdn.unitv.example/good.m3u8'
+    );
+
+    // 4) If the second stream also errors, it stays in CLEAN_WEBVIEW when re-emitted
+    act(() => {
+      view.getByTestId('video-player-exo').props.onError();
+    });
+    await waitFor(() => {
+      expect(view.getByTestId('video-player-webview')).toBeTruthy();
+    });
+    act(() => {
+      view.getByTestId('video-player-webview').props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'STREAM_CAPTURED',
+            url: 'https://cdn.unitv.example/good.m3u8',
+            headers: {},
+          }),
+        },
+      });
+    });
+    expect(view.queryByTestId('video-player-exo')).toBeNull();
+
+    // 5) Switching to episode 2 resets failedStreamUrlsRef so the URL can be tried fresh
+    view.rerender(
+      <AppServicesProvider value={services}>
+        <VideoPlayerScreen
+          navigation={{ navigate: jest.fn(), goBack: jest.fn() }}
+          route={{ params: { mediaItemId: media.id, episodeNumber: 2 } }}
+        />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(view.getByTestId('video-player-webview')).toBeTruthy();
+    });
+
+    act(() => {
+      view.getByTestId('video-player-webview').props.onMessage({
+        nativeEvent: {
+          data: JSON.stringify({
+            type: 'STREAM_CAPTURED',
+            url: 'https://cdn.unitv.example/good.m3u8',
+            headers: { Referer: 'https://www.uvwebs.info/' },
+          }),
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(view.getByTestId('video-player-exo')).toBeTruthy();
+    });
+  });
+
+  it('orders LibraryScreen PROGRESS sort by normalized completion ratio before ongoing unknown-total entries', async () => {
+    const ongoingHighEp = makeMedia({
+      id: 'anilist:701',
+      anilistId: 701,
+      titlePt: 'Ongoing Ep 5',
+      episodesTotal: null,
+    });
+    const zeroTotal = makeMedia({
+      id: 'anilist:702',
+      anilistId: 702,
+      titlePt: 'Zero Total Ep 3',
+      episodesTotal: 0,
+    });
+    const completedFull = makeMedia({
+      id: 'anilist:703',
+      anilistId: 703,
+      titlePt: 'Completed 100%',
+      episodesTotal: 12,
+    });
+    const partialHigh = makeMedia({
+      id: 'anilist:704',
+      anilistId: 704,
+      titlePt: 'Partial 75%',
+      episodesTotal: 12,
+    });
+    const notStarted = makeMedia({
+      id: 'anilist:705',
+      anilistId: 705,
+      titlePt: 'Not Started 0%',
+      episodesTotal: 12,
+    });
+
+    const watchingList = [
+      {
+        ...makeEntry(ongoingHighEp.id, {
+          status: 'WATCHING',
+          currentEpisode: 5,
+          updatedAt: '2026-11-16T12:00:00.000Z',
+        }),
+        media: ongoingHighEp,
+      },
+      {
+        ...makeEntry(zeroTotal.id, {
+          status: 'WATCHING',
+          currentEpisode: 3,
+          updatedAt: '2026-11-16T11:00:00.000Z',
+        }),
+        media: zeroTotal,
+      },
+      {
+        ...makeEntry(notStarted.id, {
+          status: 'WATCHING',
+          currentEpisode: 0,
+          updatedAt: '2026-11-16T10:00:00.000Z',
+        }),
+        media: notStarted,
+      },
+      {
+        ...makeEntry(partialHigh.id, {
+          status: 'WATCHING',
+          currentEpisode: 9,
+          updatedAt: '2026-11-16T09:00:00.000Z',
+        }),
+        media: partialHigh,
+      },
+      {
+        ...makeEntry(completedFull.id, {
+          status: 'WATCHING',
+          currentEpisode: 12,
+          updatedAt: '2026-11-16T08:00:00.000Z',
+        }),
+        media: completedFull,
+      },
+    ];
+
+    const services = createMockServices({
+      libraryRepository: {
+        getLibraryByStatus: jest.fn(async (status) =>
+          status === 'WATCHING' ? watchingList : []
+        ),
+      },
+    });
+
+    const { getAllByTestId, getByTestId } = render(
+      <AppServicesProvider value={services}>
+        <LibraryScreen navigation={{ navigate: jest.fn() }} />
+      </AppServicesProvider>
+    );
+
+    await waitFor(() => {
+      expect(getByTestId(`library-card-${completedFull.id}`)).toBeTruthy();
+    });
+
+    fireEvent.press(getByTestId('library-layout-list'));
+    fireEvent.press(getByTestId('library-sort-PROGRESS'));
+
+    expect(
+      getAllByTestId(/^library-row-anilist:/).map((node) => node.props.testID)
+    ).toEqual([
+      `library-row-${completedFull.id}`,
+      `library-row-${partialHigh.id}`,
+      `library-row-${ongoingHighEp.id}`,
+      `library-row-${zeroTotal.id}`,
+      `library-row-${notStarted.id}`,
+    ]);
+  });
+});

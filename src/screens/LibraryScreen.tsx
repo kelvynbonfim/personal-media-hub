@@ -72,9 +72,9 @@ function formatProgressLabel(entry: LibraryEntryWithMedia): string {
 function getProgressRatio(entry: LibraryEntryWithMedia): number {
   const total = entry.media.episodesTotal;
   if (total !== null && total > 0) {
-    return entry.currentEpisode / total;
+    return Math.min(1, Math.max(0, entry.currentEpisode / total));
   }
-  return entry.currentEpisode;
+  return 0;
 }
 
 function sortLibraryEntries(
@@ -96,7 +96,10 @@ function sortLibraryEntries(
       if (ratioDiff !== 0) {
         return ratioDiff;
       }
-      return b.currentEpisode - a.currentEpisode;
+      if (b.currentEpisode !== a.currentEpisode) {
+        return b.currentEpisode - a.currentEpisode;
+      }
+      return b.updatedAt.localeCompare(a.updatedAt);
     }
     if (sortMode === 'TITLE') {
       return getMediaDisplayTitle(a.media).localeCompare(

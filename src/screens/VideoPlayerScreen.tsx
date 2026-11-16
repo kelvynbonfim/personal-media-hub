@@ -104,6 +104,7 @@ export function VideoPlayerScreen(
   const initialResumeSecondsRef = React.useRef<number>(0);
   const hasSeekedInitialRef = React.useRef<boolean>(false);
   const hasAppliedAutoQualityRef = React.useRef<boolean>(false);
+  const failedStreamUrlsRef = React.useRef<Set<string>>(new Set());
 
   const [loading, setLoading] = React.useState<boolean>(servicesReady);
   const [media, setMedia] = React.useState<MediaItemRecord | null>(null);
@@ -191,6 +192,10 @@ export function VideoPlayerScreen(
   React.useEffect(() => {
     persistProgressRef.current = persistProgress;
   }, [persistProgress]);
+
+  React.useEffect(() => {
+    failedStreamUrlsRef.current.clear();
+  }, [episodeNumber, mediaItemId]);
 
   React.useEffect(() => {
     if (!servicesReady || !libraryRepository) {
@@ -464,16 +469,34 @@ export function VideoPlayerScreen(
   }, [persistProgress]);
 
   const handleVideoError = React.useCallback(() => {
+    const failedUrl = resolution?.streamUrl?.trim();
+    if (failedUrl) {
+      failedStreamUrlsRef.current.add(failedUrl);
+    }
     const fallbackUrl = buildPortalUrl(
       portalUrl,
       `vod/${encodeURIComponent(resolution?.vodId ?? mediaItemId)}?ep=${episodeNumber}`
     );
-    setResolution((prev) => ({
-      ...(prev ?? {}),
-      mode: 'CLEAN_WEBVIEW',
-      webViewUrl: prev?.webViewUrl ?? fallbackUrl,
-    }));
-  }, [episodeNumber, mediaItemId, portalUrl, resolution?.vodId]);
+    setResolution((prev) => {
+      const prevUrl = prev?.streamUrl?.trim();
+      if (prevUrl) {
+        failedStreamUrlsRef.current.add(prevUrl);
+      }
+      return {
+        ...(prev ?? {}),
+        mode: 'CLEAN_WEBVIEW',
+        streamUrl: undefined,
+        headers: undefined,
+        webViewUrl: prev?.webViewUrl ?? fallbackUrl,
+      };
+    });
+  }, [
+    episodeNumber,
+    mediaItemId,
+    portalUrl,
+    resolution?.streamUrl,
+    resolution?.vodId,
+  ]);
 
   const handleTogglePause = React.useCallback(() => {
     setPaused((prev) => {
@@ -536,7 +559,7 @@ export function VideoPlayerScreen(
 
   const handleWebViewMessage = React.useCallback((event: WebViewMessageEvent) => {
     const captured = parseCleanWebViewStreamMessage(event.nativeEvent.data);
-    if (!captured) {
+    if (!captured || failedStreamUrlsRef.current.has(captured.streamUrl)) {
       return;
     }
     setResolution((prev) => ({

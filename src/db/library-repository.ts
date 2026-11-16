@@ -501,8 +501,24 @@ export class LibraryRepository {
       existingId: existingProgress?.id,
     });
 
-    if (!existingProgress && !episodeCompleted && input.positionSeconds > 0) {
-      await this.recordWatchHistory(input.mediaItemId, input.episodeNumber, 'STARTED', now);
+    if (!episodeCompleted && input.positionSeconds > 0) {
+      const shouldCheckStartedHistory =
+        Boolean(existingProgress) &&
+        !existingProgress?.isCompleted &&
+        existingProgress?.positionSeconds === 0;
+      let shouldRecordStarted = !existingProgress;
+      if (shouldCheckStartedHistory) {
+        const existingStartedRows = await this.db.query<{ id: string }>(
+          `SELECT id FROM watch_history
+           WHERE media_item_id = ? AND episode_number = ? AND action IN ('STARTED', 'COMPLETED')
+           LIMIT 1`,
+          [input.mediaItemId, input.episodeNumber]
+        );
+        shouldRecordStarted = existingStartedRows.length === 0;
+      }
+      if (shouldRecordStarted) {
+        await this.recordWatchHistory(input.mediaItemId, input.episodeNumber, 'STARTED', now);
+      }
     } else if (episodeCompleted && !existingProgress?.isCompleted) {
       await this.recordWatchHistory(input.mediaItemId, input.episodeNumber, 'COMPLETED', now);
     }
@@ -522,6 +538,7 @@ export class LibraryRepository {
     const seasonCompletedPrompt =
       episodeCompleted &&
       media.episodesTotal !== null &&
+      media.episodesTotal > 0 &&
       input.episodeNumber >= media.episodesTotal;
 
     if (episodeCompleted && !seasonCompletedPrompt) {
@@ -589,7 +606,10 @@ export class LibraryRepository {
     );
 
     const seasonCompletedPrompt =
-      completed && media.episodesTotal !== null && episodeNumber >= media.episodesTotal;
+      completed &&
+      media.episodesTotal !== null &&
+      media.episodesTotal > 0 &&
+      episodeNumber >= media.episodesTotal;
 
     return { seasonCompletedPrompt };
   }

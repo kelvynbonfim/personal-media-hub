@@ -384,6 +384,92 @@ describe('LibraryRepository & BackupService', () => {
     expect(ongoingPlayback.nextEpisodeSuggestion).toBe(14);
   });
 
+  it('does not trigger seasonCompletedPrompt when episodesTotal is 0', async () => {
+    const zeroTotalAnime = makeMediaItem({
+      id: 'zero-total',
+      anilistId: 3003,
+      episodesTotal: 0,
+    });
+    await repo.upsertMediaItem(zeroTotalAnime);
+    await repo.setLibraryStatus(zeroTotalAnime.id, 'WATCHING');
+
+    const playback = await repo.recordPlaybackProgress({
+      mediaItemId: zeroTotalAnime.id,
+      episodeNumber: 1,
+      positionSeconds: 1300,
+      durationSeconds: 1440,
+      watchedVia: 'APP_PLAYER',
+    });
+    expect(playback).toEqual({
+      episodeCompleted: true,
+      nextEpisodeSuggestion: 2,
+      seasonCompletedPrompt: false,
+    });
+
+    const manual = await repo.toggleEpisodeManual(zeroTotalAnime.id, 2, true);
+    expect(manual).toEqual({ seasonCompletedPrompt: false });
+  });
+
+  it('records STARTED watch history once when initial playback tick is at 0s followed by positive progress', async () => {
+    const item = makeMediaItem({ id: 'zero-tick-start', anilistId: 3004, episodesTotal: 12 });
+    await repo.upsertMediaItem(item);
+    await repo.setLibraryStatus(item.id, 'WATCHING');
+
+    await repo.recordPlaybackProgress({
+      mediaItemId: item.id,
+      episodeNumber: 1,
+      positionSeconds: 0,
+      durationSeconds: 1440,
+      watchedVia: 'APP_PLAYER',
+    });
+
+    let history = await repo.getWatchHistory(item.id);
+    expect(history.filter((row) => row.action === 'STARTED')).toHaveLength(0);
+
+    await repo.recordPlaybackProgress({
+      mediaItemId: item.id,
+      episodeNumber: 1,
+      positionSeconds: 10,
+      durationSeconds: 1440,
+      watchedVia: 'APP_PLAYER',
+    });
+
+    history = await repo.getWatchHistory(item.id);
+    const startedRowsAfter10s = history.filter(
+      (row) => row.action === 'STARTED' && row.episodeNumber === 1
+    );
+    expect(startedRowsAfter10s).toHaveLength(1);
+
+    await repo.recordPlaybackProgress({
+      mediaItemId: item.id,
+      episodeNumber: 1,
+      positionSeconds: 20,
+      durationSeconds: 1440,
+      watchedVia: 'APP_PLAYER',
+    });
+
+    // Seek back to 0s and resume at 15s should also not duplicate STARTED
+    await repo.recordPlaybackProgress({
+      mediaItemId: item.id,
+      episodeNumber: 1,
+      positionSeconds: 0,
+      durationSeconds: 1440,
+      watchedVia: 'APP_PLAYER',
+    });
+    await repo.recordPlaybackProgress({
+      mediaItemId: item.id,
+      episodeNumber: 1,
+      positionSeconds: 15,
+      durationSeconds: 1440,
+      watchedVia: 'APP_PLAYER',
+    });
+
+    history = await repo.getWatchHistory(item.id);
+    expect(
+      history.filter((row) => row.action === 'STARTED' && row.episodeNumber === 1)
+    ).toHaveLength(1);
+  });
+
   it('picks a random PLAN_TO_WATCH entry respecting genreFilter and returns null when empty', async () => {
     const actionItem = makeMediaItem({
       id: 'act',
