@@ -7,6 +7,9 @@ import {
 } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { CalendarScreen } from '../screens/CalendarScreen';
+import { ExploreScreen } from '../screens/ExploreScreen';
+import { HomeScreen } from '../screens/HomeScreen';
 import { THEME_TOKENS } from '../theme/tokens';
 
 export type MainTabParamList = {
@@ -105,35 +108,6 @@ function PlaceholderScreen({
   );
 }
 
-function DefaultHomeScreen({ navigation }: { navigation?: any }): React.JSX.Element {
-  return (
-    <PlaceholderScreen
-      title="Início"
-      subtitle="Destaques, continuar assistindo e temporada atual em Ardósia Mineral & Menta."
-      actionLabel="Configurações"
-      onAction={navigation ? () => navigation.navigate('Settings') : undefined}
-    />
-  );
-}
-
-function DefaultExploreScreen(): React.JSX.Element {
-  return (
-    <PlaceholderScreen
-      title="Catálogo"
-      subtitle="Busca instantânea e filtros avançados de animes."
-    />
-  );
-}
-
-function DefaultCalendarScreen(): React.JSX.Element {
-  return (
-    <PlaceholderScreen
-      title="Calendário"
-      subtitle="Grade semanal de lançamentos e radar de próximas temporadas."
-    />
-  );
-}
-
 function DefaultLibraryScreen(): React.JSX.Element {
   return (
     <PlaceholderScreen
@@ -173,9 +147,9 @@ function DefaultSettingsScreen(): React.JSX.Element {
 }
 
 const DEFAULT_SCREENS: RootNavigatorScreens = {
-  HomeTab: DefaultHomeScreen,
-  ExploreTab: DefaultExploreScreen,
-  CalendarTab: DefaultCalendarScreen,
+  HomeTab: HomeScreen,
+  ExploreTab: ExploreScreen,
+  CalendarTab: CalendarScreen,
   LibraryTab: DefaultLibraryScreen,
   AnimeDetails: DefaultAnimeDetailsScreen,
   VideoPlayer: DefaultVideoPlayerScreen,
