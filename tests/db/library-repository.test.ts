@@ -531,4 +531,127 @@ describe('LibraryRepository & BackupService', () => {
       targetMem.close();
     }
   });
+
+  it('rejects non-finite and negative playback telemetry without writing to SQLite', async () => {
+    const item = makeMediaItem({ id: 'finite-guard', anilistId: 6001 });
+    await repo.upsertMediaItem(item);
+
+    const invalidInputs = [
+      { positionSeconds: Number.NaN, durationSeconds: 1440 },
+      { positionSeconds: Number.POSITIVE_INFINITY, durationSeconds: 1440 },
+      { positionSeconds: 100, durationSeconds: Number.NaN },
+      { positionSeconds: 100, durationSeconds: Number.POSITIVE_INFINITY },
+      { positionSeconds: -1, durationSeconds: 1440 },
+      { positionSeconds: 100, durationSeconds: -10 },
+    ];
+
+    for (const invalid of invalidInputs) {
+      await expect(
+        repo.recordPlaybackProgress({
+          mediaItemId: item.id,
+          episodeNumber: 1,
+          positionSeconds: invalid.positionSeconds,
+          durationSeconds: invalid.durationSeconds,
+          watchedVia: 'APP_PLAYER',
+        })
+      ).rejects.toThrow(/finite non-negative/i);
+    }
+
+    expect(await repo.getEpisodeProgressList(item.id)).toHaveLength(0);
+    expect(await repo.getAllLibraryEntries()).toHaveLength(0);
+  });
+
+  it('validates backup numeric coercion and dangling references upfront and rolls back mid-import failures atomically', async () => {
+    const itemA = makeMediaItem({ id: 'atomic-a', anilistId: 7001 });
+    const itemB = makeMediaItem({ id: 'atomic-b', anilistId: 7002 });
+    await repo.upsertMediaItem(itemA);
+    await repo.upsertMediaItem(itemB);
+    await repo.setLibraryStatus(itemA.id, 'WATCHING');
+    await repo.recordPlaybackProgress({
+      mediaItemId: itemA.id,
+      episodeNumber: 1,
+      positionSeconds: 500,
+      durationSeconds: 1440,
+      watchedVia: 'APP_PLAYER',
+    });
+
+    const baseExport = JSON.parse(await backup.exportBackupJson()) as Record<string, unknown>;
+    const baseEntry = (baseExport.libraryEntries as Record<string, unknown>[])[0];
+    const baseProgress = (baseExport.episodeProgress as Record<string, unknown>[])[0];
+    const baseHistory = (baseExport.watchHistory as Record<string, unknown>[])[0];
+
+    const cleanMem = createInMemorySqliteAdapter();
+    try {
+      await initializeDatabase(cleanMem.adapter);
+      const cleanRepo = new LibraryRepository(cleanMem.adapter);
+      const cleanBackup = new BackupService(cleanMem.adapter);
+
+      // 1. Reject coerced non-numeric personalScore ("", false, true)
+      for (const badScore of ['', false, true, '8']) {
+        await expect(
+          cleanBackup.importBackupJson(
+            JSON.stringify({
+              ...baseExport,
+              libraryEntries: [{ ...baseEntry, personalScore: badScore }],
+            })
+          )
+        ).rejects.toThrow();
+      }
+
+      // 2. Reject invalid negative/non-numeric fields across entries, progress, and history
+      await expect(
+        cleanBackup.importBackupJson(
+          JSON.stringify({
+            ...baseExport,
+            libraryEntries: [{ ...baseEntry, currentEpisode: -1 }],
+          })
+        )
+      ).rejects.toThrow();
+      await expect(
+        cleanBackup.importBackupJson(
+          JSON.stringify({
+            ...baseExport,
+            episodeProgress: [{ ...baseProgress, positionSeconds: -5 }],
+          })
+        )
+      ).rejects.toThrow();
+      await expect(
+        cleanBackup.importBackupJson(
+          JSON.stringify({
+            ...baseExport,
+            watchHistory: [{ ...baseHistory, dirty: 9 }],
+          })
+        )
+      ).rejects.toThrow();
+
+      // 3. Reject dangling mediaItemId references upfront before writing mediaItems
+      await expect(
+        cleanBackup.importBackupJson(
+          JSON.stringify({
+            ...baseExport,
+            libraryEntries: [{ ...baseEntry, mediaItemId: 'missing-media-id' }],
+          })
+        )
+      ).rejects.toThrow(/mediaItemId/i);
+      expect(await cleanRepo.getAllMediaItems()).toHaveLength(0);
+
+      // 4. Mid-import SQLite failure (duplicate primary key id across two libraryEntries) rolls back atomically
+      const duplicatePkPayload = JSON.stringify({
+        ...baseExport,
+        mediaItems: [itemA, itemB],
+        libraryEntries: [
+          { ...baseEntry, id: 'shared-pk', mediaItemId: itemA.id },
+          { ...baseEntry, id: 'shared-pk', mediaItemId: itemB.id },
+        ],
+      });
+      await expect(cleanBackup.importBackupJson(duplicatePkPayload)).rejects.toThrow();
+
+      expect(await cleanRepo.getAllMediaItems()).toHaveLength(0);
+      expect(await cleanRepo.getAllLibraryEntries()).toHaveLength(0);
+      expect(await cleanRepo.getAllEpisodeProgress()).toHaveLength(0);
+      expect(await cleanRepo.getWatchHistory()).toHaveLength(0);
+    } finally {
+      cleanMem.close();
+    }
+  });
 });

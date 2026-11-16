@@ -467,8 +467,15 @@ export class LibraryRepository {
     if (!Number.isInteger(input.episodeNumber) || input.episodeNumber < 1) {
       throw new Error(`Invalid episodeNumber: ${input.episodeNumber}`);
     }
-    if (input.positionSeconds < 0 || input.durationSeconds < 0) {
-      throw new Error('Playback position and duration must be non-negative.');
+    if (
+      typeof input.positionSeconds !== 'number' ||
+      !Number.isFinite(input.positionSeconds) ||
+      typeof input.durationSeconds !== 'number' ||
+      !Number.isFinite(input.durationSeconds) ||
+      input.positionSeconds < 0 ||
+      input.durationSeconds < 0
+    ) {
+      throw new Error('Playback position and duration must be finite non-negative numbers.');
     }
 
     const media = await this.requireMediaItem(input.mediaItemId);

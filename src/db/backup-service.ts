@@ -40,6 +40,66 @@ function assertNonEmptyString(value: unknown, fieldName: string): string {
   return value;
 }
 
+function parseNullableFiniteNumber(value: unknown, fieldName: string): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`Invalid backup field "${fieldName}": expected null or a finite number.`);
+  }
+  return value;
+}
+
+function parseNonNegativeFiniteNumber(
+  value: unknown,
+  fieldName: string,
+  defaultValue: number
+): number {
+  if (value === undefined) {
+    return defaultValue;
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error(
+      `Invalid backup field "${fieldName}": expected a finite non-negative number.`
+    );
+  }
+  return value;
+}
+
+function parseNonNegativeInteger(
+  value: unknown,
+  fieldName: string,
+  defaultValue: number
+): number {
+  if (value === undefined) {
+    return defaultValue;
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new Error(`Invalid backup field "${fieldName}": expected a non-negative integer.`);
+  }
+  return value;
+}
+
+function parseDirtyFlag(value: unknown, fieldName: string): number {
+  if (value === undefined) {
+    return 1;
+  }
+  if (value !== 0 && value !== 1) {
+    throw new Error(`Invalid backup field "${fieldName}": expected 0 or 1.`);
+  }
+  return value;
+}
+
+function parsePersonalScore(value: unknown, fieldName: string): number | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 10) {
+    throw new Error(`Invalid backup payload: ${fieldName} must be null or a number in 0..10.`);
+  }
+  return value;
+}
+
 function parseArrayField<T>(
   raw: unknown,
   fieldName: string,
@@ -83,8 +143,8 @@ function parseBackupSettings(rawSettings: unknown): AppSettingsRecord {
 
 function parseBackupMediaItem(item: Record<string, unknown>, idx: number): MediaItemRecord {
   const id = assertNonEmptyString(item.id, `mediaItems[${idx}].id`);
-  if (typeof item.anilistId !== 'number' || !Number.isFinite(item.anilistId)) {
-    throw new Error(`Invalid backup payload: mediaItems[${idx}].anilistId must be a number.`);
+  if (typeof item.anilistId !== 'number' || !Number.isInteger(item.anilistId)) {
+    throw new Error(`Invalid backup payload: mediaItems[${idx}].anilistId must be an integer.`);
   }
   const titleRomaji = assertNonEmptyString(item.titleRomaji, `mediaItems[${idx}].titleRomaji`);
   const mediaType =
@@ -94,8 +154,8 @@ function parseBackupMediaItem(item: Record<string, unknown>, idx: number): Media
     id,
     mediaType,
     anilistId: item.anilistId,
-    malId: typeof item.malId === 'number' ? item.malId : null,
-    tmdbId: typeof item.tmdbId === 'number' ? item.tmdbId : null,
+    malId: parseNullableFiniteNumber(item.malId, `mediaItems[${idx}].malId`),
+    tmdbId: parseNullableFiniteNumber(item.tmdbId, `mediaItems[${idx}].tmdbId`),
     titleRomaji,
     titleEnglish: typeof item.titleEnglish === 'string' ? item.titleEnglish : null,
     titlePt: typeof item.titlePt === 'string' ? item.titlePt : null,
@@ -103,12 +163,12 @@ function parseBackupMediaItem(item: Record<string, unknown>, idx: number): Media
     coverUrl: typeof item.coverUrl === 'string' ? item.coverUrl : '',
     bannerUrl: typeof item.bannerUrl === 'string' ? item.bannerUrl : null,
     genresJson: typeof item.genresJson === 'string' ? item.genresJson : '[]',
-    seasonYear: typeof item.seasonYear === 'number' ? item.seasonYear : null,
+    seasonYear: parseNullableFiniteNumber(item.seasonYear, `mediaItems[${idx}].seasonYear`),
     seasonName: typeof item.seasonName === 'string' ? item.seasonName : null,
-    episodesTotal: typeof item.episodesTotal === 'number' ? item.episodesTotal : null,
+    episodesTotal: parseNullableFiniteNumber(item.episodesTotal, `mediaItems[${idx}].episodesTotal`),
     statusAiring: typeof item.statusAiring === 'string' ? item.statusAiring : 'UNKNOWN',
-    nextAiringAt: typeof item.nextAiringAt === 'number' ? item.nextAiringAt : null,
-    nextAiringEp: typeof item.nextAiringEp === 'number' ? item.nextAiringEp : null,
+    nextAiringAt: parseNullableFiniteNumber(item.nextAiringAt, `mediaItems[${idx}].nextAiringAt`),
+    nextAiringEp: parseNullableFiniteNumber(item.nextAiringEp, `mediaItems[${idx}].nextAiringEp`),
     relationsJson: typeof item.relationsJson === 'string' ? item.relationsJson : '[]',
     cachedAt: typeof item.cachedAt === 'string' ? item.cachedAt : new Date().toISOString(),
   };
@@ -123,31 +183,27 @@ function parseBackupLibraryEntry(entry: Record<string, unknown>, idx: number): L
   if (typeof entry.status !== 'string' || !WATCH_STATUSES.includes(entry.status as WatchStatus)) {
     throw new Error(`Invalid backup payload: libraryEntries[${idx}].status is invalid.`);
   }
-  const personalScore =
-    entry.personalScore === null || entry.personalScore === undefined
-      ? null
-      : Number(entry.personalScore);
-  if (
-    personalScore !== null &&
-    (!Number.isFinite(personalScore) || personalScore < 0 || personalScore > 10)
-  ) {
-    throw new Error(
-      `Invalid backup payload: libraryEntries[${idx}].personalScore must be null or 0..10.`
-    );
-  }
 
   return {
     id,
     mediaItemId,
     status: entry.status as WatchStatus,
-    personalScore,
-    currentEpisode: typeof entry.currentEpisode === 'number' ? entry.currentEpisode : 0,
+    personalScore: parsePersonalScore(entry.personalScore, `libraryEntries[${idx}].personalScore`),
+    currentEpisode: parseNonNegativeInteger(
+      entry.currentEpisode,
+      `libraryEntries[${idx}].currentEpisode`,
+      0
+    ),
     notes: typeof entry.notes === 'string' ? entry.notes : '',
-    rewatchCount: typeof entry.rewatchCount === 'number' ? entry.rewatchCount : 0,
+    rewatchCount: parseNonNegativeInteger(
+      entry.rewatchCount,
+      `libraryEntries[${idx}].rewatchCount`,
+      0
+    ),
     startedAt: typeof entry.startedAt === 'string' ? entry.startedAt : null,
     completedAt: typeof entry.completedAt === 'string' ? entry.completedAt : null,
     updatedAt: typeof entry.updatedAt === 'string' ? entry.updatedAt : new Date().toISOString(),
-    dirty: typeof entry.dirty === 'number' ? entry.dirty : 1,
+    dirty: parseDirtyFlag(entry.dirty, `libraryEntries[${idx}].dirty`),
   };
 }
 
@@ -174,12 +230,20 @@ function parseBackupEpisodeProgress(
     id,
     mediaItemId,
     episodeNumber: prog.episodeNumber,
-    positionSeconds: typeof prog.positionSeconds === 'number' ? prog.positionSeconds : 0,
-    durationSeconds: typeof prog.durationSeconds === 'number' ? prog.durationSeconds : 0,
+    positionSeconds: parseNonNegativeFiniteNumber(
+      prog.positionSeconds,
+      `episodeProgress[${idx}].positionSeconds`,
+      0
+    ),
+    durationSeconds: parseNonNegativeFiniteNumber(
+      prog.durationSeconds,
+      `episodeProgress[${idx}].durationSeconds`,
+      0
+    ),
     isCompleted: Boolean(prog.isCompleted),
     watchedVia: prog.watchedVia === 'MANUAL' ? 'MANUAL' : 'APP_PLAYER',
     updatedAt: typeof prog.updatedAt === 'string' ? prog.updatedAt : new Date().toISOString(),
-    dirty: typeof prog.dirty === 'number' ? prog.dirty : 1,
+    dirty: parseDirtyFlag(prog.dirty, `episodeProgress[${idx}].dirty`),
   };
 }
 
@@ -196,10 +260,14 @@ function parseBackupWatchHistory(item: Record<string, unknown>, idx: number): Wa
   return {
     id,
     mediaItemId,
-    episodeNumber: typeof item.episodeNumber === 'number' ? item.episodeNumber : 0,
+    episodeNumber: parseNonNegativeInteger(
+      item.episodeNumber,
+      `watchHistory[${idx}].episodeNumber`,
+      0
+    ),
     action: item.action as WatchHistoryRecord['action'],
     occurredAt: typeof item.occurredAt === 'string' ? item.occurredAt : new Date().toISOString(),
-    dirty: typeof item.dirty === 'number' ? item.dirty : 1,
+    dirty: parseDirtyFlag(item.dirty, `watchHistory[${idx}].dirty`),
   };
 }
 
@@ -264,6 +332,34 @@ export class BackupService {
     this.repo = new LibraryRepository(db);
   }
 
+  private async verifyReferentialIntegrity(payload: BackupPayloadV1): Promise<void> {
+    const payloadMediaIds = new Set(payload.mediaItems.map((item) => item.id));
+    const referencedIds = [
+      ...payload.libraryEntries.map((e) => e.mediaItemId),
+      ...payload.episodeProgress.map((p) => p.mediaItemId),
+      ...payload.watchHistory.map((h) => h.mediaItemId),
+      ...payload.unitvLinks.map((l) => l.mediaItemId),
+    ];
+
+    const missingInPayload = Array.from(
+      new Set(referencedIds.filter((id) => !payloadMediaIds.has(id)))
+    );
+
+    if (missingInPayload.length === 0) {
+      return;
+    }
+
+    const existingMedia = await this.repo.getAllMediaItems();
+    const existingIds = new Set(existingMedia.map((item) => item.id));
+
+    const danglingId = missingInPayload.find((id) => !existingIds.has(id));
+    if (danglingId) {
+      throw new Error(
+        `Invalid backup payload: dangling mediaItemId reference "${danglingId}" not found in mediaItems or database.`
+      );
+    }
+  }
+
   async exportBackupJson(): Promise<string> {
     const [mediaItems, libraryEntries, episodeProgress, watchHistory, unitvLinks, currentSettings] =
       await Promise.all([
@@ -302,107 +398,120 @@ export class BackupService {
     jsonPayload: string
   ): Promise<{ importedEntries: number; importedProgress: number }> {
     const payload = validateAndNormalizePayload(jsonPayload);
+    await this.verifyReferentialIntegrity(payload);
+
     const mediaIdMap = new Map<string, string>();
 
-    for (const item of payload.mediaItems) {
-      await this.repo.upsertMediaItem(item);
-      const stored = await this.repo.getMediaItemByAnilistId(item.anilistId);
-      mediaIdMap.set(item.id, stored ? stored.id : item.id);
-    }
+    await this.db.execute('BEGIN TRANSACTION');
+    try {
+      for (const item of payload.mediaItems) {
+        await this.repo.upsertMediaItem(item);
+        const stored = await this.repo.getMediaItemByAnilistId(item.anilistId);
+        mediaIdMap.set(item.id, stored ? stored.id : item.id);
+      }
 
-    for (const entry of payload.libraryEntries) {
-      const resolvedMediaId = mediaIdMap.get(entry.mediaItemId) ?? entry.mediaItemId;
-      await this.db.execute(
-        `INSERT INTO library_entries (
-          id, media_item_id, status, personal_score, current_episode, notes,
-          rewatch_count, started_at, completed_at, updated_at, dirty
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(media_item_id) DO UPDATE SET
-          status = excluded.status,
-          personal_score = excluded.personal_score,
-          current_episode = excluded.current_episode,
-          notes = excluded.notes,
-          rewatch_count = excluded.rewatch_count,
-          started_at = excluded.started_at,
-          completed_at = excluded.completed_at,
-          updated_at = excluded.updated_at,
-          dirty = excluded.dirty`,
-        [
-          entry.id,
-          resolvedMediaId,
-          entry.status,
-          entry.personalScore,
-          entry.currentEpisode,
-          entry.notes,
-          entry.rewatchCount,
-          entry.startedAt,
-          entry.completedAt,
-          entry.updatedAt,
-          entry.dirty,
-        ]
-      );
-    }
+      for (const entry of payload.libraryEntries) {
+        const resolvedMediaId = mediaIdMap.get(entry.mediaItemId) ?? entry.mediaItemId;
+        await this.db.execute(
+          `INSERT INTO library_entries (
+            id, media_item_id, status, personal_score, current_episode, notes,
+            rewatch_count, started_at, completed_at, updated_at, dirty
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(media_item_id) DO UPDATE SET
+            status = excluded.status,
+            personal_score = excluded.personal_score,
+            current_episode = excluded.current_episode,
+            notes = excluded.notes,
+            rewatch_count = excluded.rewatch_count,
+            started_at = excluded.started_at,
+            completed_at = excluded.completed_at,
+            updated_at = excluded.updated_at,
+            dirty = excluded.dirty`,
+          [
+            entry.id,
+            resolvedMediaId,
+            entry.status,
+            entry.personalScore,
+            entry.currentEpisode,
+            entry.notes,
+            entry.rewatchCount,
+            entry.startedAt,
+            entry.completedAt,
+            entry.updatedAt,
+            entry.dirty,
+          ]
+        );
+      }
 
-    for (const prog of payload.episodeProgress) {
-      const resolvedMediaId = mediaIdMap.get(prog.mediaItemId) ?? prog.mediaItemId;
-      await this.db.execute(
-        `INSERT INTO episode_progress (
-          id, media_item_id, episode_number, position_seconds, duration_seconds,
-          is_completed, watched_via, updated_at, dirty
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(media_item_id, episode_number) DO UPDATE SET
-          position_seconds = excluded.position_seconds,
-          duration_seconds = excluded.duration_seconds,
-          is_completed = excluded.is_completed,
-          watched_via = excluded.watched_via,
-          updated_at = excluded.updated_at,
-          dirty = excluded.dirty`,
-        [
-          prog.id,
-          resolvedMediaId,
-          prog.episodeNumber,
-          prog.positionSeconds,
-          prog.durationSeconds,
-          prog.isCompleted ? 1 : 0,
-          prog.watchedVia,
-          prog.updatedAt,
-          prog.dirty,
-        ]
-      );
-    }
+      for (const prog of payload.episodeProgress) {
+        const resolvedMediaId = mediaIdMap.get(prog.mediaItemId) ?? prog.mediaItemId;
+        await this.db.execute(
+          `INSERT INTO episode_progress (
+            id, media_item_id, episode_number, position_seconds, duration_seconds,
+            is_completed, watched_via, updated_at, dirty
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(media_item_id, episode_number) DO UPDATE SET
+            position_seconds = excluded.position_seconds,
+            duration_seconds = excluded.duration_seconds,
+            is_completed = excluded.is_completed,
+            watched_via = excluded.watched_via,
+            updated_at = excluded.updated_at,
+            dirty = excluded.dirty`,
+          [
+            prog.id,
+            resolvedMediaId,
+            prog.episodeNumber,
+            prog.positionSeconds,
+            prog.durationSeconds,
+            prog.isCompleted ? 1 : 0,
+            prog.watchedVia,
+            prog.updatedAt,
+            prog.dirty,
+          ]
+        );
+      }
 
-    for (const event of payload.watchHistory) {
-      const resolvedMediaId = mediaIdMap.get(event.mediaItemId) ?? event.mediaItemId;
-      await this.db.execute(
-        `INSERT INTO watch_history (
-          id, media_item_id, episode_number, action, occurred_at, dirty
-        ) VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          media_item_id = excluded.media_item_id,
-          episode_number = excluded.episode_number,
-          action = excluded.action,
-          occurred_at = excluded.occurred_at,
-          dirty = excluded.dirty`,
-        [
-          event.id,
-          resolvedMediaId,
-          event.episodeNumber,
-          event.action,
-          event.occurredAt,
-          event.dirty,
-        ]
-      );
-    }
+      for (const event of payload.watchHistory) {
+        const resolvedMediaId = mediaIdMap.get(event.mediaItemId) ?? event.mediaItemId;
+        await this.db.execute(
+          `INSERT INTO watch_history (
+            id, media_item_id, episode_number, action, occurred_at, dirty
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(id) DO UPDATE SET
+            media_item_id = excluded.media_item_id,
+            episode_number = excluded.episode_number,
+            action = excluded.action,
+            occurred_at = excluded.occurred_at,
+            dirty = excluded.dirty`,
+          [
+            event.id,
+            resolvedMediaId,
+            event.episodeNumber,
+            event.action,
+            event.occurredAt,
+            event.dirty,
+          ]
+        );
+      }
 
-    for (const link of payload.unitvLinks) {
-      const resolvedMediaId = mediaIdMap.get(link.mediaItemId) ?? link.mediaItemId;
-      await this.repo.saveUniTvLink({
-        ...link,
-        mediaItemId: resolvedMediaId,
-      });
-    }
+      for (const link of payload.unitvLinks) {
+        const resolvedMediaId = mediaIdMap.get(link.mediaItemId) ?? link.mediaItemId;
+        await this.repo.saveUniTvLink({
+          ...link,
+          mediaItemId: resolvedMediaId,
+        });
+      }
 
-    await this.repo.saveSettings(payload.settings);
+      await this.repo.saveSettings(payload.settings);
+      await this.db.execute('COMMIT');
+    } catch (error) {
+      try {
+        await this.db.execute('ROLLBACK');
+      } catch {
+        // Ignore rollback failure so the original import error is preserved.
+      }
+      throw error;
+    }
 
     return {
       importedEntries: payload.libraryEntries.length,
