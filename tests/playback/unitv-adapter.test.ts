@@ -16,9 +16,13 @@ import {
   PlaybackSourceAdapter,
 } from '../../src/playback/types';
 import {
+  buildCleanWebViewCommandScript,
+  buildPortalWebViewUrl,
   buildTitleCandidates,
   CLEAN_WEBVIEW_HIDE_CHROME_CSS,
   CLEAN_WEBVIEW_INJECT_SCRIPT,
+  isDirectWebViewPortalUrl,
+  parseCleanWebViewPlayerMessage,
   parseCleanWebViewStreamMessage,
   UniTvPlaybackAdapter,
   UniTvSessionBridge,
@@ -644,5 +648,256 @@ describe('UniTvPlaybackAdapter', () => {
       headers: { Referer: 'https://mirror-4.unitv.example/' },
     });
     expect(parseCleanWebViewStreamMessage('invalid')).toBeNull();
+  });
+});
+
+
+describe('UniTv v1.2.0 unitvwebs.com integration', () => {
+  it('preserves /vod/details/... paths in buildPortalWebViewUrl without wrapping into /vod/{encoded}', () => {
+    expect(
+      buildPortalWebViewUrl(
+        'https://www.unitvwebs.com/',
+        '/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+        3
+      )
+    ).toBe('https://www.unitvwebs.com/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC');
+
+    expect(
+      buildPortalWebViewUrl(
+        'https://www.unitvwebs.com',
+        'https://www.unitvwebs.com/vod/details/0/ABC',
+        2
+      )
+    ).toBe('https://www.unitvwebs.com/vod/details/0/ABC');
+  });
+
+  it('detects direct WebView hosts cleanly via isDirectWebViewPortalUrl', () => {
+    expect(isDirectWebViewPortalUrl('https://www.unitvwebs.com')).toBe(true);
+    expect(isDirectWebViewPortalUrl('https://unitvwebs.com/search/vod')).toBe(true);
+    expect(isDirectWebViewPortalUrl('https://www.uvwebs.info')).toBe(false);
+    expect(isDirectWebViewPortalUrl(null)).toBe(false);
+  });
+
+  it('skips 8s stream extraction on unitvwebs.com, saves /vod/details/... link, and returns CLEAN_WEBVIEW immediately', async () => {
+    const { backend } = createMemoryBackend();
+    const credsStore = new CredentialsStore(backend);
+    await credsStore.saveUniTvCredentials({ username: 'user@x', password: 'secret' });
+
+    const saveUniTvLink = jest.fn(async () => undefined);
+    const bridge = createMockBridge({
+      searchVod: jest.fn(async () => ({
+        vodId: '/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+        title: 'Naruto Shippuden',
+        watchPath: '/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+      })),
+    });
+
+    const adapter = new UniTvPlaybackAdapter({
+      bridge,
+      credentialsStore: credsStore,
+      repository: {
+        saveUniTvLink,
+      },
+    });
+
+    const resolution = await adapter.resolveEpisodePlayback({
+      media: createSampleMedia({ titlePt: 'Naruto' }),
+      episodeNumber: 1,
+      portalUrl: 'https://www.unitvwebs.com',
+      existingLink: null,
+    });
+
+    expect(bridge.extractEpisodeStream).not.toHaveBeenCalled();
+    expect(saveUniTvLink).toHaveBeenCalledWith(
+      expect.objectContaining({
+        unitvVodId: '/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+        unitvTitle: 'Naruto Shippuden',
+      })
+    );
+    expect(resolution).toEqual({
+      mode: 'CLEAN_WEBVIEW',
+      webViewUrl:
+        'https://www.unitvwebs.com/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+      matchedTitle: 'Naruto Shippuden',
+      vodId: '/vod/details/0/DD045854FEB0BE6B0ABBD9ABF6A302CC',
+    });
+  });
+
+  it('propagates CAPTCHA_REQUIRED and USER_CANCELLED without misclassifying as AUTH_FAILED', async () => {
+    const { backend } = createMemoryBackend();
+    const credsStore = new CredentialsStore(backend);
+
+    const captchaBridge = createMockBridge({
+      authenticate: jest.fn(async () => ({
+        ok: false,
+        errorCode: 'CAPTCHA_REQUIRED' as const,
+      })),
+    });
+    const captchaAdapter = new UniTvPlaybackAdapter({
+      bridge: captchaBridge,
+      credentialsStore: credsStore,
+      repository: {
+        saveUniTvLink: jest.fn(async () => undefined),
+      },
+    });
+
+    const captchaRes = await captchaAdapter.resolveEpisodePlayback({
+      media: createSampleMedia(),
+      episodeNumber: 1,
+      portalUrl: 'https://www.unitvwebs.com',
+      existingLink: null,
+    });
+    expect(captchaRes).toEqual({
+      mode: 'CLEAN_WEBVIEW',
+      errorCode: 'CAPTCHA_REQUIRED',
+    });
+
+    const cancelBridge = createMockBridge({
+      searchVod: jest.fn(async () => ({
+        errorCode: 'USER_CANCELLED' as const,
+      })),
+    });
+    const cancelAdapter = new UniTvPlaybackAdapter({
+      bridge: cancelBridge,
+      credentialsStore: credsStore,
+      repository: {
+        saveUniTvLink: jest.fn(async () => undefined),
+      },
+    });
+
+    const cancelRes = await cancelAdapter.resolveEpisodePlayback({
+      media: createSampleMedia(),
+      episodeNumber: 1,
+      portalUrl: 'https://www.unitvwebs.com',
+      existingLink: null,
+    });
+    expect(cancelRes).toEqual({
+      mode: 'CLEAN_WEBVIEW',
+      errorCode: 'USER_CANCELLED',
+    });
+  });
+
+  it('implements testConnection returning WEBVIEW_ONLY on session OK and sanitized BLOCKED copy on failures', async () => {
+    const { backend } = createMemoryBackend();
+    const credsStore = new CredentialsStore(backend);
+    await credsStore.saveUniTvCredentials({
+      username: 'secret-user-name',
+      password: 'super-secret-password',
+    });
+
+    const okBridge = createMockBridge({
+      verifySession: jest.fn(async () => ({ ok: true as const })),
+    });
+    const okAdapter = new UniTvPlaybackAdapter({
+      bridge: okBridge,
+      credentialsStore: credsStore,
+      repository: {
+        saveUniTvLink: jest.fn(async () => undefined),
+      },
+    });
+
+    const okResult = await okAdapter.testConnection({
+      portalUrl: 'https://www.unitvwebs.com',
+    });
+    expect(okResult).toEqual({
+      status: 'WEBVIEW_ONLY',
+      reason: expect.stringMatching(/Sessão UniTV verificada/i),
+    });
+
+    const failBridge = createMockBridge({
+      verifySession: jest.fn(async () => ({
+        errorCode: 'CAPTCHA_REQUIRED' as const,
+      })),
+    });
+    const failAdapter = new UniTvPlaybackAdapter({
+      bridge: failBridge,
+      credentialsStore: credsStore,
+      repository: {
+        saveUniTvLink: jest.fn(async () => undefined),
+      },
+    });
+
+    const failResult = await failAdapter.testConnection({
+      portalUrl: 'https://www.unitvwebs.com',
+    });
+    expect(failResult.status).toBe('BLOCKED');
+    expect(failResult.reason).toMatch(/captcha/i);
+    expect(failResult.reason).not.toContain('secret-user-name');
+    expect(failResult.reason).not.toContain('super-secret-password');
+  });
+
+  it('includes Quasar/Video.js hiding CSS, .pmh-portal-episodes support, and WebView player command/message helpers', () => {
+    expect(CLEAN_WEBVIEW_HIDE_CHROME_CSS).toContain('.q-header');
+    expect(CLEAN_WEBVIEW_HIDE_CHROME_CSS).toContain('.q-toolbar');
+    expect(CLEAN_WEBVIEW_HIDE_CHROME_CSS).toContain('.vjs-control-bar');
+    expect(CLEAN_WEBVIEW_HIDE_CHROME_CSS).toContain('.vjs-text-track-display');
+    expect(CLEAN_WEBVIEW_HIDE_CHROME_CSS).toContain('pmh-portal-episodes');
+    expect(CLEAN_WEBVIEW_INJECT_SCRIPT).toContain('WEB_PLAYER_STATE');
+    expect(CLEAN_WEBVIEW_INJECT_SCRIPT).toContain('WEB_PLAYER_INTERACTION_REQUIRED');
+    expect(CLEAN_WEBVIEW_INJECT_SCRIPT).toContain('__pmhPlayer');
+
+    expect(buildCleanWebViewCommandScript({ type: 'TOGGLE_PLAY' })).toContain(
+      'togglePlay'
+    );
+    expect(buildCleanWebViewCommandScript({ type: 'SEEK', timeSeconds: Number.NaN })).toContain(
+      'seek(0)'
+    );
+    expect(
+      buildCleanWebViewCommandScript({ type: 'SET_PORTAL_EPISODES', visible: true })
+    ).toContain('setPortalEpisodes(true)');
+
+    expect(
+      parseCleanWebViewPlayerMessage(
+        JSON.stringify({
+          type: 'WEB_PLAYER_STATE',
+          currentTime: 42.5,
+          duration: 1450,
+          paused: false,
+          ended: false,
+          videoHeight: 480,
+        })
+      )
+    ).toEqual({
+      type: 'WEB_PLAYER_STATE',
+      currentTime: 42.5,
+      duration: 1450,
+      paused: false,
+      ended: false,
+      videoHeight: 480,
+    });
+
+    expect(
+      parseCleanWebViewPlayerMessage(
+        JSON.stringify({
+          type: 'WEB_PLAYER_STATE',
+          currentTime: Number.NaN,
+          duration: -10,
+          paused: true,
+          ended: false,
+          videoHeight: -1,
+        })
+      )
+    ).toEqual({
+      type: 'WEB_PLAYER_STATE',
+      currentTime: 0,
+      duration: 0,
+      paused: true,
+      ended: false,
+      videoHeight: 0,
+    });
+
+    expect(
+      parseCleanWebViewPlayerMessage(
+        JSON.stringify({
+          type: 'WEB_PLAYER_INTERACTION_REQUIRED',
+          reason: 'CAPTCHA',
+        })
+      )
+    ).toEqual({
+      type: 'WEB_PLAYER_INTERACTION_REQUIRED',
+      reason: 'CAPTCHA',
+    });
+
+    expect(parseCleanWebViewPlayerMessage('not-json')).toBeNull();
   });
 });
