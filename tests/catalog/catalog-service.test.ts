@@ -585,6 +585,91 @@ describe('CatalogService & API Clients', () => {
       );
       expect(directEnriched.titlePt).toBe('Ataque dos Titãs');
     });
+
+    it('does not overwrite AniList results with mismatched Western TMDB matches on direct query, while matching Japanese same-year Kanji TMDB entries', async () => {
+      await repo.saveSettings({ tmdbApiKey: 'tmdb-free-key-123' });
+
+      const dragonBallZ = makeMediaItem({
+        anilistId: 813,
+        titleRomaji: 'Dragon Ball Z',
+        titleEnglish: 'Dragon Ball Z',
+        titlePt: null,
+        seasonYear: 1989,
+        synopsis: 'Goku defends Earth from Saiyan invaders.',
+      });
+
+      const frieren = makeMediaItem({
+        anilistId: 154587,
+        titleRomaji: 'Sousou no Frieren',
+        titleEnglish: "Frieren: Beyond Journey's End",
+        titlePt: null,
+        seasonYear: 2023,
+        synopsis: 'After the party of heroes defeated the Demon King...',
+      });
+
+      const service = new CatalogService(repo, {
+        aniListClient: createStubAniList({
+          searchCatalog: jest.fn(async (filter: CatalogFilter) => {
+            if (filter.query === 'Dragon') {
+              return [dragonBallZ];
+            }
+            if (filter.query === 'Frieren') {
+              return [frieren];
+            }
+            return [];
+          }),
+        }),
+        jikanClient: createStubJikan(),
+        tmdbClient: createStubTmdb({
+          searchAnimePtBr: jest.fn(async (query: string) => {
+            if (query === 'Dragon') {
+              return [
+                {
+                  tmdbId: 10191,
+                  titlePt: 'Como Treinar o Seu Dragão',
+                  originalTitle: 'How to Train Your Dragon',
+                  overviewPt: 'Soluço faz amizade com um dragão.',
+                  mediaType: 'movie' as const,
+                },
+              ];
+            }
+            if (query === 'Frieren') {
+              return [
+                {
+                  tmdbId: 209867,
+                  titlePt: 'Frieren e a Jornada para o Além',
+                  originalTitle: '葬送のフリーレン',
+                  overviewPt: 'Após derrotar o Rei Demônio, a maga elfa Frieren reflete sobre a vida.',
+                  mediaType: 'tv' as const,
+                  originalLanguage: 'ja',
+                  releaseYear: 2023,
+                },
+              ];
+            }
+            return [];
+          }),
+        }),
+      });
+
+      const dragonResults = await service.exploreCatalog({ query: 'Dragon' }, new Set());
+      expect(dragonResults).toHaveLength(1);
+      expect(dragonResults[0].tmdbId).toBeNull();
+      expect(dragonResults[0].titlePt).toBeNull();
+      expect(dragonResults[0].synopsis).toBe('Goku defends Earth from Saiyan invaders.');
+
+      const savedDbz = await repo.getMediaItemByAnilistId(813);
+      expect(savedDbz?.tmdbId).toBeNull();
+      expect(savedDbz?.titlePt).toBeNull();
+      expect(savedDbz?.synopsis).toBe('Goku defends Earth from Saiyan invaders.');
+
+      const frierenResults = await service.exploreCatalog({ query: 'Frieren' }, new Set());
+      expect(frierenResults).toHaveLength(1);
+      expect(frierenResults[0].tmdbId).toBe(209867);
+      expect(frierenResults[0].titlePt).toBe('Frieren e a Jornada para o Além');
+      expect(frierenResults[0].synopsis).toBe(
+        'Após derrotar o Rei Demônio, a maga elfa Frieren reflete sobre a vida.'
+      );
+    });
   });
 
   describe('getHomeFeed & DB identity preservation', () => {
@@ -827,6 +912,56 @@ describe('CatalogService & API Clients', () => {
         originalTitle: '進撃の巨人',
         overviewPt: 'Sinopse oficial em português.',
         mediaType: 'tv',
+      });
+    });
+
+    it('TmdbHttpClient prioritizes Japanese animation (original_language === ja) over Western animation and extracts releaseYear', async () => {
+      const mockFetch = jest.fn(async (_url: string, _init?: unknown) => ({
+        ok: true,
+        status: 200,
+        headers: { get: () => null },
+        json: async () => ({
+          results: [
+            {
+              id: 10191,
+              media_type: 'movie',
+              title: 'Como Treinar o Seu Dragão',
+              original_title: 'How to Train Your Dragon',
+              overview: 'Dragões e vikings.',
+              genre_ids: [16, 12],
+              original_language: 'en',
+              release_date: '2010-03-26',
+            },
+            {
+              id: 12971,
+              media_type: 'tv',
+              name: 'Dragon Ball Z',
+              original_name: 'ドラゴンボールZ',
+              overview: 'As aventuras de Goku e os Guerreiros Z.',
+              genre_ids: [16, 10759],
+              original_language: 'ja',
+              first_air_date: '1989-04-26',
+            },
+          ],
+        }),
+      }));
+
+      const client = new TmdbHttpClient({ fetchFn: mockFetch as never });
+      const matches = await client.searchAnimePtBr('Dragon', 'my-v3-key');
+
+      expect(matches).toHaveLength(2);
+      expect(matches[0]).toMatchObject({
+        tmdbId: 12971,
+        titlePt: 'Dragon Ball Z',
+        originalTitle: 'ドラゴンボールZ',
+        mediaType: 'tv',
+        originalLanguage: 'ja',
+        releaseYear: 1989,
+      });
+      expect(matches[1]).toMatchObject({
+        tmdbId: 10191,
+        originalLanguage: 'en',
+        releaseYear: 2010,
       });
     });
 

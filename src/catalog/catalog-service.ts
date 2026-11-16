@@ -88,6 +88,24 @@ function normalizeTitleKey(value: string | null | undefined): string {
     .trim();
 }
 
+function hasSharedTitleToken(
+  media: MediaItemRecord,
+  match: TmdbAnimeLocalization
+): boolean {
+  const mediaTokens = new Set(
+    [media.titleRomaji, media.titleEnglish, media.titlePt]
+      .flatMap((t) => normalizeTitleKey(t).split(/\s+/))
+      .filter((token) => token.length >= 4)
+  );
+  if (mediaTokens.size === 0) {
+    return false;
+  }
+  const matchTokens = [match.titlePt, match.originalTitle]
+    .flatMap((t) => normalizeTitleKey(t).split(/\s+/))
+    .filter((token) => token.length >= 4);
+  return matchTokens.some((token) => mediaTokens.has(token));
+}
+
 function extractAnilistIdFromDeterministicId(mediaItemId: string): number | null {
   const match = /^(?:anilist:|anilist_|anime-)(\d+)$/.exec(mediaItemId.trim());
   if (match) {
@@ -385,24 +403,72 @@ export class CatalogService {
     };
   }
 
+  private isYearCompatible(
+    mediaYear: number | null,
+    tmdbYear: number | null | undefined
+  ): boolean {
+    if (mediaYear === null || tmdbYear === null || tmdbYear === undefined) {
+      return true;
+    }
+    return Math.abs(mediaYear - tmdbYear) <= 1;
+  }
+
+  private isLanguageCompatible(originalLanguage: string | null | undefined): boolean {
+    if (!originalLanguage) {
+      return true;
+    }
+    return originalLanguage.trim().toLowerCase() === 'ja';
+  }
+
   private findBestTmdbMatch(
     media: MediaItemRecord,
-    matches: TmdbAnimeLocalization[]
+    matches: TmdbAnimeLocalization[],
+    options: { allowTranslatedFallback?: boolean; isTopResult?: boolean } = {}
   ): TmdbAnimeLocalization | null {
     if (matches.length === 0) {
       return null;
     }
+    const { allowTranslatedFallback = false, isTopResult = true } = options;
     const candidateKeys = new Set(
       [media.titleRomaji, media.titleEnglish, media.titlePt]
         .map(normalizeTitleKey)
         .filter(Boolean)
     );
-    const exactMatch = matches.find(
+    const exactMatches = matches.filter(
       (match) =>
         candidateKeys.has(normalizeTitleKey(match.originalTitle)) ||
         candidateKeys.has(normalizeTitleKey(match.titlePt))
     );
-    return exactMatch ?? matches[0];
+    if (exactMatches.length > 0) {
+      return (
+        exactMatches.find(
+          (match) =>
+            this.isLanguageCompatible(match.originalLanguage) &&
+            this.isYearCompatible(media.seasonYear, match.releaseYear)
+        ) ?? exactMatches[0]
+      );
+    }
+
+    const compatible = matches.filter(
+      (match) =>
+        this.isLanguageCompatible(match.originalLanguage) &&
+        this.isYearCompatible(media.seasonYear, match.releaseYear)
+    );
+
+    const japaneseYearConfirmed = compatible.find(
+      (match) =>
+        match.originalLanguage?.trim().toLowerCase() === 'ja' &&
+        media.seasonYear !== null &&
+        match.releaseYear !== null &&
+        match.releaseYear !== undefined &&
+        Math.abs(media.seasonYear - match.releaseYear) <= 1 &&
+        (isTopResult || hasSharedTitleToken(media, match))
+    );
+    if (japaneseYearConfirmed) {
+      return japaneseYearConfirmed;
+    }
+
+    return allowTranslatedFallback ? (compatible[0] ?? null) : null;
   }
 
   async getHomeFeed(userEntries: LibraryEntryRecord[]): Promise<HomeFeedResult> {
@@ -497,6 +563,7 @@ export class CatalogService {
 
     let results: MediaItemRecord[] = [];
     let fromCacheOnly = false;
+    let usedTranslatedQuery = false;
 
     try {
       results = await this.aniListClient.searchCatalog(filter);
@@ -505,6 +572,7 @@ export class CatalogService {
           ...filter,
           query: translatedQuery,
         });
+        usedTranslatedQuery = results.length > 0;
       }
     } catch {
       try {
@@ -514,6 +582,7 @@ export class CatalogService {
             ...filter,
             query: translatedQuery,
           });
+          usedTranslatedQuery = results.length > 0;
         }
       } catch {
         fromCacheOnly = true;
@@ -527,6 +596,7 @@ export class CatalogService {
             ...filter,
             query: translatedQuery,
           });
+          usedTranslatedQuery = results.length > 0;
         }
       }
     }
@@ -534,20 +604,11 @@ export class CatalogService {
     if (!fromCacheOnly) {
       if (tmdbMatches.length > 0 && results.length > 0) {
         results = results.map((item, index) => {
-          const matchedTmdb = this.findBestTmdbMatch(item, tmdbMatches);
-          if (!matchedTmdb) {
-            return item;
-          }
-          const itemTitleKeys = new Set(
-            [item.titleRomaji, item.titleEnglish, item.titlePt]
-              .map(normalizeTitleKey)
-              .filter(Boolean)
-          );
-          const isExactTitleMatch =
-            itemTitleKeys.has(normalizeTitleKey(matchedTmdb.originalTitle)) ||
-            itemTitleKeys.has(normalizeTitleKey(matchedTmdb.titlePt));
-          const isMatch = isExactTitleMatch || (Boolean(translatedQuery) && index === 0);
-          return isMatch ? this.applyTmdbMatchToMedia(item, matchedTmdb) : item;
+          const matchedTmdb = this.findBestTmdbMatch(item, tmdbMatches, {
+            allowTranslatedFallback: usedTranslatedQuery && index === 0,
+            isTopResult: index === 0,
+          });
+          return matchedTmdb ? this.applyTmdbMatchToMedia(item, matchedTmdb) : item;
         });
       }
       results = await this.upsertAndNormalizeMedia(results);

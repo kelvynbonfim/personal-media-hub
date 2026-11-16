@@ -20,6 +20,21 @@ interface RawTmdbSearchResult {
   original_title?: string | null;
   overview?: string | null;
   genre_ids?: unknown;
+  original_language?: string | null;
+  first_air_date?: string | null;
+  release_date?: string | null;
+}
+
+function parseReleaseYear(dateStr: string | null | undefined): number | null {
+  if (!dateStr || typeof dateStr !== 'string') {
+    return null;
+  }
+  const match = /^(\d{4})/.exec(dateStr.trim());
+  if (!match) {
+    return null;
+  }
+  const year = Number(match[1]);
+  return Number.isFinite(year) ? year : null;
 }
 
 export interface TmdbHttpClientOptions {
@@ -103,10 +118,22 @@ export class TmdbHttpClient implements TmdbClient {
     const isAnimation = (item: RawTmdbSearchResult): boolean =>
       Array.isArray(item.genre_ids) && item.genre_ids.includes(TMDB_ANIMATION_GENRE_ID);
 
-    const prioritized = [
-      ...candidates.filter(isAnimation),
-      ...candidates.filter((item) => !isAnimation(item)),
-    ];
+    const priorityTier = (item: RawTmdbSearchResult): number => {
+      const anim = isAnimation(item);
+      const isJapanese = item.original_language?.trim().toLowerCase() === 'ja';
+      if (anim && isJapanese) {
+        return 0;
+      }
+      if (anim) {
+        return 1;
+      }
+      if (isJapanese) {
+        return 2;
+      }
+      return 3;
+    };
+
+    const prioritized = [...candidates].sort((a, b) => priorityTier(a) - priorityTier(b));
 
     return prioritized.map((item) => {
       const isMovie = item.media_type === 'movie';
@@ -116,6 +143,8 @@ export class TmdbHttpClient implements TmdbClient {
       const originalTitle = isMovie
         ? item.original_title?.trim() || localizedTitle
         : item.original_name?.trim() || localizedTitle;
+      const originalLanguage = item.original_language?.trim().toLowerCase() || null;
+      const releaseYear = parseReleaseYear(isMovie ? item.release_date : item.first_air_date);
 
       return {
         tmdbId: item.id,
@@ -123,6 +152,8 @@ export class TmdbHttpClient implements TmdbClient {
         originalTitle,
         overviewPt: item.overview?.trim() ? item.overview.trim() : null,
         mediaType: isMovie ? 'movie' : 'tv',
+        ...(originalLanguage ? { originalLanguage } : {}),
+        ...(releaseYear !== null ? { releaseYear } : {}),
       };
     });
   }

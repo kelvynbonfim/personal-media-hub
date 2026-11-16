@@ -107,6 +107,8 @@ export interface TmdbAnimeLocalization {
   originalTitle: string;
   overviewPt: string | null;
   mediaType: 'tv' | 'movie';
+  originalLanguage?: string | null;
+  releaseYear?: number | null;
 }
 
 export interface TmdbClient {
