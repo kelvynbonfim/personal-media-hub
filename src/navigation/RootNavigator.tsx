@@ -1,5 +1,5 @@
 import React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text } from 'react-native';
 import {
   DarkTheme,
   NavigationContainer,
@@ -7,9 +7,13 @@ import {
 } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
+import { AnimeDetailsScreen } from '../screens/AnimeDetailsScreen';
 import { CalendarScreen } from '../screens/CalendarScreen';
 import { ExploreScreen } from '../screens/ExploreScreen';
 import { HomeScreen } from '../screens/HomeScreen';
+import { LibraryScreen } from '../screens/LibraryScreen';
+import { SettingsScreen } from '../screens/SettingsScreen';
+import { VideoPlayerScreen } from '../screens/VideoPlayerScreen';
 import { THEME_TOKENS } from '../theme/tokens';
 
 export type MainTabParamList = {
@@ -75,85 +79,14 @@ function TabIcon({
   return <Text style={[styles.tabIcon, { color }]}>{TAB_GLYPHS[routeName]}</Text>;
 }
 
-function PlaceholderScreen({
-  title,
-  subtitle,
-  actionLabel,
-  onAction,
-}: {
-  title: string;
-  subtitle: string;
-  actionLabel?: string;
-  onAction?: () => void;
-}): React.JSX.Element {
-  return (
-    <View style={styles.placeholderContainer}>
-      <View style={styles.placeholderCard}>
-        <Text style={styles.placeholderTitle}>{title}</Text>
-        <Text style={styles.placeholderSubtitle}>{subtitle}</Text>
-        {actionLabel && onAction ? (
-          <Pressable
-            onPress={onAction}
-            accessibilityRole="button"
-            style={({ pressed }) => [
-              styles.placeholderButton,
-              pressed && styles.placeholderButtonPressed,
-            ]}
-          >
-            <Text style={styles.placeholderButtonText}>{actionLabel}</Text>
-          </Pressable>
-        ) : null}
-      </View>
-    </View>
-  );
-}
-
-function DefaultLibraryScreen(): React.JSX.Element {
-  return (
-    <PlaceholderScreen
-      title="Biblioteca"
-      subtitle="Seus animes organizados nos 6 status de acompanhamento."
-    />
-  );
-}
-
-function DefaultAnimeDetailsScreen(): React.JSX.Element {
-  return (
-    <PlaceholderScreen
-      title="Detalhes do Anime"
-      subtitle="Linha do tempo da franquia, progresso e lista de episódios."
-    />
-  );
-}
-
-function DefaultVideoPlayerScreen({ navigation }: { navigation?: any }): React.JSX.Element {
-  return (
-    <PlaceholderScreen
-      title="Player Full HD"
-      subtitle="Reprodução integrada com seleção automática de maior resolução."
-      actionLabel="Fechar"
-      onAction={navigation ? () => navigation.goBack() : undefined}
-    />
-  );
-}
-
-function DefaultSettingsScreen(): React.JSX.Element {
-  return (
-    <PlaceholderScreen
-      title="Configurações"
-      subtitle="Integração UniTV, sincronização Supabase e backup JSON."
-    />
-  );
-}
-
 const DEFAULT_SCREENS: RootNavigatorScreens = {
   HomeTab: HomeScreen,
   ExploreTab: ExploreScreen,
   CalendarTab: CalendarScreen,
-  LibraryTab: DefaultLibraryScreen,
-  AnimeDetails: DefaultAnimeDetailsScreen,
-  VideoPlayer: DefaultVideoPlayerScreen,
-  Settings: DefaultSettingsScreen,
+  LibraryTab: LibraryScreen,
+  AnimeDetails: AnimeDetailsScreen,
+  VideoPlayer: VideoPlayerScreen,
+  Settings: SettingsScreen,
 };
 
 const NavigatorScreensContext = React.createContext<RootNavigatorScreens>(DEFAULT_SCREENS);
@@ -227,10 +160,12 @@ function MainTabsNavigator(): React.JSX.Element {
   );
 }
 
-export function RootNavigator({
-  screens,
-  withNavigationContainer = true,
-}: RootNavigatorProps): React.JSX.Element {
+export function RootNavigator(props: RootNavigatorProps): React.JSX.Element;
+export function RootNavigator(): React.JSX.Element;
+export function RootNavigator(
+  props: RootNavigatorProps = {}
+): React.JSX.Element {
+  const { screens, withNavigationContainer = true } = props;
   const resolvedScreens = React.useMemo<RootNavigatorScreens>(
     () => ({
       HomeTab: screens?.HomeTab ?? DEFAULT_SCREENS.HomeTab,
@@ -318,45 +253,5 @@ const styles = StyleSheet.create({
   tabIcon: {
     fontSize: 16,
     fontWeight: '700',
-  },
-  placeholderContainer: {
-    flex: 1,
-    backgroundColor: THEME_TOKENS.bg.canvas,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: THEME_TOKENS.spacing.xl,
-  },
-  placeholderCard: {
-    width: '100%',
-    maxWidth: 420,
-    backgroundColor: THEME_TOKENS.bg.card,
-    borderColor: THEME_TOKENS.border.subtle,
-    borderWidth: 1,
-    borderRadius: THEME_TOKENS.radius.lg,
-    padding: THEME_TOKENS.spacing.lg,
-    gap: THEME_TOKENS.spacing.sm,
-  },
-  placeholderTitle: {
-    ...THEME_TOKENS.typography.sectionTitle,
-    color: THEME_TOKENS.text.primary,
-  },
-  placeholderSubtitle: {
-    ...THEME_TOKENS.typography.body,
-    color: THEME_TOKENS.text.secondary,
-  },
-  placeholderButton: {
-    marginTop: THEME_TOKENS.spacing.sm,
-    alignSelf: 'flex-start',
-    backgroundColor: THEME_TOKENS.accent.primary,
-    paddingHorizontal: THEME_TOKENS.spacing.lg,
-    paddingVertical: THEME_TOKENS.spacing.sm,
-    borderRadius: THEME_TOKENS.radius.md,
-  },
-  placeholderButtonPressed: {
-    opacity: 0.85,
-  },
-  placeholderButtonText: {
-    ...THEME_TOKENS.typography.cardTitle,
-    color: THEME_TOKENS.bg.canvas,
   },
 });

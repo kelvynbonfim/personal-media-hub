@@ -8,6 +8,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { createClient } from '@supabase/supabase-js';
 import { openDatabaseAsync } from 'expo-sqlite';
 import { CatalogService } from './src/catalog/catalog-service';
 import { BackupService } from './src/db/backup-service';
@@ -22,6 +23,16 @@ import {
   RootNavigatorScreens,
 } from './src/navigation/RootNavigator';
 import { CredentialsStore } from './src/playback/credentials-store';
+import {
+  RuntimeWebViewBridgeController,
+  RuntimeWebViewBridgeHost,
+} from './src/playback/runtime-webview-bridge';
+import { UniTvPlaybackAdapter } from './src/playback/unitv-adapter';
+import { UniTvProbeResult } from './src/playback/unitv-probe';
+import {
+  createSupabaseSyncClient,
+  SupabaseSyncEngine,
+} from './src/sync/supabase-sync';
 import { THEME_TOKENS } from './src/theme/tokens';
 
 const DATABASE_NAME = 'personal-media-hub.db';
@@ -36,7 +47,27 @@ type BootstrapState =
   | { status: 'ready'; services: AppServices }
   | { status: 'error'; message: string };
 
-async function bootstrapServices(): Promise<AppServices> {
+function createOptionalSyncEngine(
+  db: ReturnType<typeof createExpoSqliteAdapter>
+): SupabaseSyncEngine | null {
+  const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL?.trim();
+  const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY?.trim();
+  if (!supabaseUrl || !supabaseAnonKey) {
+    return null;
+  }
+
+  const client = createClient(supabaseUrl, supabaseAnonKey, {
+    auth: {
+      persistSession: true,
+      autoRefreshToken: false,
+    },
+  });
+  return new SupabaseSyncEngine(db, createSupabaseSyncClient(client));
+}
+
+async function bootstrapServices(
+  bridgeController: RuntimeWebViewBridgeController
+): Promise<AppServices> {
   const sqliteDb = await openDatabaseAsync(DATABASE_NAME);
   const db = createExpoSqliteAdapter(sqliteDb);
   await initializeDatabase(db);
@@ -46,16 +77,41 @@ async function bootstrapServices(): Promise<AppServices> {
   const catalogService = new CatalogService(libraryRepository);
   const credentialsStore = new CredentialsStore();
 
+  const playbackAdapter = new UniTvPlaybackAdapter({
+    bridge: bridgeController,
+    credentialsStore,
+    repository: libraryRepository,
+  }) as UniTvPlaybackAdapter & {
+    testConnection?: (params: {
+      portalUrl: string;
+      username: string;
+      password: string;
+    }) => Promise<UniTvProbeResult>;
+  };
+  playbackAdapter.testConnection = (params) =>
+    bridgeController.testConnection(params);
+
+  const syncEngine = createOptionalSyncEngine(db);
+
   return {
     db,
     libraryRepository,
     backupService,
     catalogService,
     credentialsStore,
+    playbackAdapter,
+    syncEngine,
   };
 }
 
-export function App({ services: injectedServices, screens }: AppProps): React.JSX.Element {
+export function App(props: AppProps): React.JSX.Element;
+export function App(): React.JSX.Element;
+export function App(props: AppProps = {}): React.JSX.Element {
+  const { services: injectedServices, screens } = props;
+  const bridgeController = React.useMemo(
+    () => new RuntimeWebViewBridgeController(),
+    []
+  );
   const [state, setState] = React.useState<BootstrapState>(() =>
     injectedServices
       ? { status: 'ready', services: injectedServices }
@@ -76,7 +132,7 @@ export function App({ services: injectedServices, screens }: AppProps): React.JS
     let cancelled = false;
     setState({ status: 'loading' });
 
-    bootstrapServices()
+    bootstrapServices(bridgeController)
       .then((services) => {
         if (!cancelled) {
           setState({ status: 'ready', services });
@@ -95,7 +151,7 @@ export function App({ services: injectedServices, screens }: AppProps): React.JS
     return () => {
       cancelled = true;
     };
-  }, [injectedServices, attempt]);
+  }, [bridgeController, injectedServices, attempt]);
 
   return (
     <SafeAreaProvider>
@@ -106,6 +162,9 @@ export function App({ services: injectedServices, screens }: AppProps): React.JS
       {state.status === 'ready' ? (
         <AppServicesProvider value={state.services}>
           <RootNavigator screens={screens} />
+          {!injectedServices ? (
+            <RuntimeWebViewBridgeHost controller={bridgeController} />
+          ) : null}
         </AppServicesProvider>
       ) : state.status === 'error' ? (
         <View style={styles.centeredContainer}>
