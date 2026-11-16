@@ -4,12 +4,13 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   name: 'Personal Media Hub',
   slug: 'personal-media-hub',
-  version: '1.0.0',
+  version: '1.1.0',
   orientation: 'default',
   userInterfaceStyle: 'dark',
   backgroundColor: '#080B0C',
   android: {
     package: 'com.personal.mediahub',
+    versionCode: 2,
     adaptiveIcon: {
       backgroundColor: '#080B0C',
     },

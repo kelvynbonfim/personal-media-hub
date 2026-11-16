@@ -8,6 +8,9 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: write
+
 jobs:
   build-android-apk:
     runs-on: ubuntu-latest
@@ -68,3 +71,17 @@ jobs:
           path: android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
           retention-days: 14
+
+      - name: Publish GitHub Release APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -e "console.log(require('./version.json').version)")
+          NOTES=$(node -e "console.log(require('./version.json').releaseNotes || 'Nova atualização disponível.')")
+          cp android/app/build/outputs/apk/release/*.apk ./app-release.apk
+          TAG="v${VERSION}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" ./app-release.apk --clobber
+          else
+            gh release create "$TAG" ./app-release.apk --title "Personal Media Hub ${TAG}" --notes "$NOTES"
+          fi

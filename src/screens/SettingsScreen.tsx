@@ -1,6 +1,7 @@
 import React from 'react';
 import {
   ActivityIndicator,
+  Linking,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -21,6 +22,12 @@ import {
   UniTvProbeResult,
 } from '../playback/unitv-probe';
 import { STATUS_META, THEME_TOKENS } from '../theme/tokens';
+import {
+  AppUpdateInfo,
+  checkForAppUpdate,
+  CURRENT_APP_VERSION,
+  DEFAULT_APK_DOWNLOAD_URL,
+} from '../updates/app-updater';
 import { BaseDiscoveryScreenProps } from './discovery-helpers';
 
 export interface SettingsScreenProps extends BaseDiscoveryScreenProps {
@@ -30,6 +37,7 @@ export interface SettingsScreenProps extends BaseDiscoveryScreenProps {
     password: string;
   }) => Promise<UniTvProbeResult>;
   syncUserId?: string;
+  checkForUpdate?: () => Promise<AppUpdateInfo>;
 }
 
 interface ProbeTestableAdapter {
@@ -73,6 +81,7 @@ export function SettingsScreen(
     services: injectedServices,
     testConnection: injectedTestConnection,
     syncUserId: initialSyncUserId,
+    checkForUpdate: injectedCheckForUpdate,
   } = props;
   const contextServices = useOptionalAppServices();
 
@@ -120,6 +129,10 @@ export function SettingsScreen(
   const [syncFeedback, setSyncFeedback] = React.useState<string | null>(null);
   const [backupJsonText, setBackupJsonText] = React.useState<string>('');
   const [backupFeedback, setBackupFeedback] = React.useState<string | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = React.useState<boolean>(false);
+  const [updateCheckResult, setUpdateCheckResult] =
+    React.useState<AppUpdateInfo | null>(null);
+  const [updateFeedback, setUpdateFeedback] = React.useState<string | null>(null);
 
   const isMountedRef = React.useRef<boolean>(true);
 
@@ -529,6 +542,38 @@ export function SettingsScreen(
     }
   }, [libraryRepository, tmdbKeyInput]);
 
+  const handleCheckUpdate = React.useCallback(async (): Promise<void> => {
+    if (checkingUpdate) {
+      return;
+    }
+    setCheckingUpdate(true);
+    setUpdateFeedback(null);
+    try {
+      const info = injectedCheckForUpdate
+        ? await injectedCheckForUpdate()
+        : await checkForAppUpdate();
+      if (!isMountedRef.current) {
+        return;
+      }
+      setUpdateCheckResult(info);
+      setUpdateFeedback(
+        info.hasUpdate
+          ? `Nova versão v${info.latestVersion} disponível! ${info.releaseNotes}`
+          : `Seu aplicativo já está na versão mais recente (v${info.currentVersion}).`
+      );
+    } catch {
+      if (isMountedRef.current) {
+        setUpdateFeedback(
+          'Não foi possível verificar atualizações agora. Tente novamente.'
+        );
+      }
+    } finally {
+      if (isMountedRef.current) {
+        setCheckingUpdate(false);
+      }
+    }
+  }, [checkingUpdate, injectedCheckForUpdate]);
+
   if (!servicesReady) {
     return (
       <View style={styles.centeredBox}>
@@ -831,6 +876,53 @@ export function SettingsScreen(
           >
             <Text style={styles.secondaryButtonText}>Salvar chave TMDB</Text>
           </Pressable>
+        </View>
+
+        <View style={styles.sectionCard}>
+          <Text style={styles.sectionTitle}>
+            {`Atualizações do Aplicativo (v${CURRENT_APP_VERSION})`}
+          </Text>
+          <Text style={styles.mutedText}>
+            Sempre que houver melhorias, você recebe um aviso ao abrir o app para
+            baixar e atualizar direto pelo celular sem perder seus dados.
+          </Text>
+
+          <View style={styles.buttonRow}>
+            <Pressable
+              onPress={() => void handleCheckUpdate()}
+              disabled={checkingUpdate}
+              accessibilityRole="button"
+              testID="settings-check-update-button"
+              style={styles.outlineAccentButton}
+            >
+              <Text style={styles.outlineAccentButtonText}>
+                {checkingUpdate ? 'Verificando...' : 'Verificar Atualização Agora'}
+              </Text>
+            </Pressable>
+
+            {updateCheckResult?.hasUpdate ? (
+              <Pressable
+                onPress={() =>
+                  void Linking.openURL(
+                    updateCheckResult.downloadUrl || DEFAULT_APK_DOWNLOAD_URL
+                  )
+                }
+                accessibilityRole="button"
+                testID="settings-download-update-button"
+                style={styles.primaryButton}
+              >
+                <Text style={styles.primaryButtonText}>
+                  Baixar e Instalar Atualização
+                </Text>
+              </Pressable>
+            ) : null}
+          </View>
+
+          {updateFeedback ? (
+            <Text testID="settings-update-feedback" style={styles.feedbackText}>
+              {updateFeedback}
+            </Text>
+          ) : null}
         </View>
 
         <View style={styles.sectionCard}>
